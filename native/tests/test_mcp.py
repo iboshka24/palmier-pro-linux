@@ -1,7 +1,11 @@
 import json
+import os
+import tempfile
 import urllib.request
 import urllib.error
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 from palmier.model import Editor
 from palmier.media import ExportQueue
 from palmier.mcp import MCPServer,Tools,SCHEMAS
@@ -15,8 +19,13 @@ class MCPTests(unittest.TestCase):
         self.tools=Tools(self.e,ExportQueue(self.e))
         self.server=MCPServer(self.tools,0)
         self.url=f"http://127.0.0.1:{self.server.port}/mcp"
+        self.feedback=tempfile.TemporaryDirectory()
+        self.feedback_env=patch.dict(os.environ,{"PALMIER_FEEDBACK_DIR":self.feedback.name})
+        self.feedback_env.start()
 
     def tearDown(self):
+        self.feedback_env.stop()
+        self.feedback.cleanup()
         self.server.stop()
 
     def rpc(self,method,params=None,headers=None):
@@ -68,9 +77,14 @@ class MCPTests(unittest.TestCase):
         ids=[c["id"] for c in timeline2["tracks"][0]["clips"]]
         if len(ids) >= 2:
             self.assertFalse(self.call("copy_clip_settings",dict(sourceClipId=ids[0],targetClipIds=ids[1:]))["isError"])
+        layout=self.call("apply_layout",dict(layout="side_by_side",fit="fit",slots={
+            "left":dict(clipIds=[cid]),"right":dict(clipIds=[cid])}))
+        self.assertFalse(layout["isError"],layout)
+        self.assertFalse(self.call("apply_effect",dict(clipIds=[cid],effects=[]))["isError"])
         for honest in ["list_models","get_transcript","detect_beats","generate_video","generate_image","generate_audio","upscale_media","send_feedback"]:
             args = dict(prompt="test") if honest.startswith("generate") else (dict(mediaRef="a") if honest=="upscale_media" else (dict(kind="bug",message="test") if honest=="send_feedback" else {}))
             self.assertFalse(self.call(honest,args)["isError"])
+        self.assertTrue(list(Path(self.feedback.name).glob("feedback.jsonl")))
 
     def test_browser_origin_and_bad_host_refused(self):
         for headers in [dict(Origin="https://evil.example"),dict(Host="evil.example")]:

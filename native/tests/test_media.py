@@ -5,7 +5,7 @@ import time
 import unittest
 from pathlib import Path
 from palmier.model import Editor
-from palmier.media import executable, probe, render, ExportQueue, run
+from palmier.media import executable, probe, render, ExportQueue, run, filter_graph, detect_silence
 
 
 class MediaTests(unittest.TestCase):
@@ -82,13 +82,39 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(output.read_bytes(),b"original")
 
     def test_linux_color_transform_effect_render(self):
-        self.e.apply_color([self.cid], dict(saturation=1.0, contrast=0.5))
+        self.e.apply_color([self.cid], dict(saturation=1.0, contrast=0.5, highlights=1, shadows=-1, sharpen=1))
         self.e.apply_effect([self.cid], [dict(type="grayscale")])
         self.e.properties([self.cid], dict(transform=dict(centerX=0.5, centerY=0.5, width=0.5, height=0.5)))
+        self.e.clip(self.cid)[1]["transform"]["fit"] = "fit"
+        _, filters, _, _ = filter_graph(self.e, self.e.timeline, self.root)
+        graph = ";".join(filters)
+        self.assertNotIn("eq=highlight", graph)
+        self.assertNotIn("eq=shadow", graph)
+        self.assertIn("eq=gamma", graph)
+        self.assertIn("unsharp", graph)
+        self.assertIn("force_original_aspect_ratio=decrease", graph)
         output = self.root/"graded.mp4"
         result = render(self.e, self.e.timeline, output)
         self.assertTrue(output.stat().st_size > 1000)
         self.assertIn("path", result)
+
+    def test_hidden_video_track_keeps_its_audio(self):
+        self.e.timeline["tracks"][0]["hidden"] = True
+        _, filters, _, _ = filter_graph(self.e, self.e.timeline, self.root)
+        graph = ";".join(filters)
+        self.assertIn("[2:a]", graph)
+        self.assertNotIn("overlay=", graph)
+
+    def test_detect_silence_reads_ffmpeg_stderr(self):
+        wav = self.root/"leading-silence.wav"
+        run([executable("ffmpeg"), "-v", "error", "-y",
+             "-f", "lavfi", "-i", "aevalsrc=0:d=1",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+             "-filter_complex", "[0:a][1:a]concat=n=2:v=0:a=1", str(wav)], timeout=30)
+        spans = detect_silence(wav, -30, 0.4)
+        self.assertTrue(spans)
+        self.assertLess(spans[0][0], 0.25)
+        self.assertGreater(spans[0][1], 0.7)
 
     def test_missing_media_reports_error(self):
         self.red.unlink()

@@ -39,6 +39,25 @@ def end(clip):
     return clip["startFrame"] + clip["durationFrames"]
 
 
+def merge_spans(spans):
+    merged = []
+    for start, finish in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], finish)
+        else:
+            merged.append([start, finish])
+    return [(start, finish) for start, finish in merged]
+
+
+def shift_before(frame, spans):
+    total = 0
+    for start, finish in merge_spans(spans):
+        if start >= frame:
+            break
+        total += min(finish, frame) - start
+    return total
+
+
 def clip_defaults(kind, ref, start, duration, trim=0):
     return dict(id=uid(), mediaRef=ref, mediaType=kind, sourceClipType=kind,
                 startFrame=start, durationFrames=duration, trimStartFrame=trim,
@@ -98,7 +117,7 @@ def validate_project(doc, manifest):
                 for fx in c.get("effects", []) or []:
                     if not isinstance(fx.get("type"), str):
                         raise ValueError("Effect type must be a string")
-                for knob in ("exposure", "contrast", "saturation", "temperature", "highlights", "shadows"):
+                for knob in ("exposure", "contrast", "saturation", "temperature", "highlights", "shadows", "sharpen"):
                     if knob in (c.get("color") or {}):
                         number(c["color"][knob], "color." + knob, -10, 10)
     if doc.get("activeTimelineId") not in {t["id"] for t in doc["timelines"]}:
@@ -372,12 +391,14 @@ class Editor:
             return dict(clipIds=result)
         return self.mutate("Add clips", action)
 
-    def move(self, moves):
+    def move(self, moves, follow_links=True):
         if not moves:
             raise ValueError("moves must not be empty")
         def action():
-            targets = []
+            planned, seen = [], set()
             for m in moves:
+                if m.get("clipId") in seen:
+                    continue
                 if "toFrame" not in m and "toTrack" not in m:
                     raise ValueError("Specify toFrame or toTrack")
                 tr, c = self.clip(m["clipId"])
@@ -388,36 +409,71 @@ class Editor:
                 dest = self.timeline["tracks"][index]
                 if tr["type"] != dest["type"]:
                     raise ValueError("Cannot move across video/audio zones")
-                targets.append((tr, c, dest, integer(m.get("toFrame", c["startFrame"]), "toFrame")))
-            for tr, c, dest, frame in targets:
+                frame = integer(m.get("toFrame", c["startFrame"]), "toFrame")
+                planned.append((tr, c, dest, frame))
+                seen.add(c["id"])
+                if follow_links and c.get("linkGroupId") and "toFrame" in m:
+                    delta = frame - c["startFrame"]
+                    if delta:
+                        for tr2 in self.timeline["tracks"]:
+                            for other in tr2["clips"]:
+                                if other["id"] in seen or other.get("linkGroupId") != c["linkGroupId"]:
+                                    continue
+                                partner = other["startFrame"] + delta
+                                if partner < 0:
+                                    raise ValueError("Linked clip would move before the start of the timeline")
+                                planned.append((tr2, other, tr2, partner))
+                                seen.add(other["id"])
+            for tr, c, _, _ in planned:
                 tr["clips"].remove(c)
+            for _, c, dest, frame in planned:
                 c["startFrame"] = frame
                 self.overwrite(dest, frame, end(c))
                 dest["clips"].append(c)
-            return dict(clipIds=[c["id"] for _, c, _, _ in targets])
+            return dict(clipIds=[c["id"] for _, c, _, _ in planned])
         return self.mutate("Move clips", action)
 
     def split(self, splits):
         def action():
-            result = []
+            pending = []
             for s in splits:
-                tr, c = self.clip(s["clipId"])
                 frame = integer(s["atFrame"], "atFrame")
+                _, c = self.clip(s["clipId"])
+                pending.append((c["id"], frame))
+                group = c.get("linkGroupId")
+                if not group:
+                    continue
+                for tr in self.timeline["tracks"]:
+                    for other in tr["clips"]:
+                        if other.get("linkGroupId") == group and other["id"] != c["id"] and other["startFrame"] < frame < end(other):
+                            pending.append((other["id"], frame))
+            result, seen = [], set()
+            for cid, frame in pending:
+                if (cid, frame) in seen:
+                    continue
+                seen.add((cid, frame))
+                tr, c = self.clip(cid)
                 if not c["startFrame"] < frame < end(c):
                     raise ValueError("Split point must be strictly inside the clip")
                 if any(c.get(k) for k in ("positionTrack", "opacityTrack", "volumeTrack", "scaleTrack", "cropTrack", "multicamGroupId")):
                     raise ValueError("Splitting animated/multicam original clips is not implemented")
-                right = copy.deepcopy(c)
-                right["id"] = uid()
-                offset = frame - c["startFrame"]
-                right["startFrame"], right["durationFrames"] = frame, c["durationFrames"] - offset
-                right["trimStartFrame"] += round(offset * c.get("speed", 1))
-                right["fadeInFrames"] = 0
-                c["durationFrames"], c["fadeOutFrames"] = offset, 0
-                tr["clips"].append(right)
+                right = self._split_clip(tr, c, frame)
                 result.append(right["id"])
             return dict(newClipIds=result)
         return self.mutate("Split clips", action)
+
+    def _split_clip(self, track, clip, frame):
+        if not clip["startFrame"] < frame < end(clip):
+            return None
+        right = copy.deepcopy(clip)
+        right["id"] = uid()
+        offset = frame - clip["startFrame"]
+        right["startFrame"], right["durationFrames"] = frame, clip["durationFrames"] - offset
+        right["trimStartFrame"] += round(offset * clip.get("speed", 1))
+        right["fadeInFrames"] = 0
+        clip["durationFrames"], clip["fadeOutFrames"] = offset, 0
+        track["clips"].append(right)
+        return right
 
     def remove(self, clip_ids):
         def action():
@@ -560,6 +616,39 @@ class Editor:
                         markers=copy.deepcopy(t["markers"]))
         return self.mutate("Manage markers", action)
 
+    def _entry_span(self, media, entry):
+        if not isinstance(entry, dict):
+            raise ValueError("Clip entry must be an object")
+        kind = media["type"]
+        fps = self.timeline["fps"]
+        full = round(media["duration"] * fps)
+        if "source" in entry:
+            if "startFrame" in entry or "endFrame" in entry:
+                raise ValueError("Use source [startSeconds, endSeconds] OR startFrame/endFrame")
+            if len(entry["source"]) != 2:
+                raise ValueError("source must be [startSeconds, endSeconds]")
+            a, b = entry["source"]
+            number(a, "source start", 0, media["duration"])
+            number(b, "source end", a, media["duration"])
+            trim, dur = round(a * fps), round((b - a) * fps)
+        else:
+            has_start, has_end = "startFrame" in entry, "endFrame" in entry
+            if has_start != has_end:
+                raise ValueError("startFrame and endFrame together set the inserted length; pass both or neither")
+            if has_start:
+                start = integer(entry["startFrame"], "startFrame")
+                finish = integer(entry["endFrame"], "endFrame")
+                if finish <= start:
+                    raise ValueError("endFrame must be after startFrame")
+                trim, dur = 0, finish - start
+            else:
+                trim, dur = 0, full
+        if dur < 1:
+            raise ValueError("Clip duration must be at least 1 frame")
+        if kind != "image" and trim + dur > full:
+            raise ValueError("Clip exceeds available source duration")
+        return trim, dur
+
     def insert_clips(self, at_frame, entries):
         at_frame = integer(at_frame, "atFrame")
         if not entries:
@@ -567,89 +656,114 @@ class Editor:
         def action():
             if not self.timeline["tracks"]:
                 self.timeline["tracks"].append(new_track("video"))
-            total_push = 0
             staged = []
             for e in entries:
-                media = self.media(e["mediaRef"])
+                media = self.media(e.get("mediaRef") if isinstance(e, dict) else None)
                 if not media:
                     raise ValueError("Unknown mediaRef")
                 kind = media["type"]
-                dur = e.get("endFrame", e.get("startFrame", 0) + round(media["duration"] * self.timeline["fps"])) - e.get("startFrame", 0)
-                integer(dur, "durationFrames", 1)
-                total_push += dur
-                staged.append((e, media, kind, dur))
-            pushed_tracks = set()
-            for track in self.timeline["tracks"]:
-                if not track.get("syncLocked", True):
-                    continue
-                for c in track["clips"]:
-                    if c["startFrame"] >= at_frame:
-                        c["startFrame"] += total_push
-                pushed_tracks.add(track["id"])
-            result = []
-            cursor = at_frame
-            for e, media, kind, dur in staged:
-                index = e.get("trackIndex", 0)
-                integer(index, "trackIndex")
+                if kind not in ("video", "audio", "image"):
+                    raise ValueError("Unsupported media type")
+                trim, dur = self._entry_span(media, e)
+                index = integer(e.get("trackIndex", 0), "trackIndex")
                 if index >= len(self.timeline["tracks"]):
                     raise ValueError("Unknown trackIndex")
                 track = self.timeline["tracks"][index]
                 if (track["type"] == "audio") != (kind == "audio"):
                     raise ValueError("Media is incompatible with destination track")
-                c = clip_defaults(kind, media["id"], cursor, dur)
-                track["clips"].append(c)
-                result.append(c["id"])
+                staged.append((track, media, kind, trim, dur))
+            total_push = sum(item[4] for item in staged)
+            dest_ids = {item[0]["id"] for item in staged}
+            dest_sync = any(track.get("syncLocked", True) for track in self.timeline["tracks"] if track["id"] in dest_ids)
+
+            def ripples(track):
+                if track["id"] in dest_ids:
+                    return True
+                return bool(dest_sync and track.get("syncLocked", True))
+
+            for track in self.timeline["tracks"]:
+                if not ripples(track):
+                    continue
+                for clip in list(track["clips"]):
+                    self._split_clip(track, clip, at_frame)
+                for clip in track["clips"]:
+                    if clip["startFrame"] >= at_frame:
+                        clip["startFrame"] += total_push
+            result, cursor = [], at_frame
+            for track, media, kind, trim, dur in staged:
+                clip = clip_defaults(kind, media["id"], cursor, dur, trim)
+                track["clips"].append(clip)
+                result.append(clip["id"])
                 cursor += dur
             return dict(clipIds=result, pushedFrames=total_push)
         return self.mutate("Insert clips (ripple)", action)
+
+    def _subtract_clip(self, clip, spans, removed):
+        pieces = [clip]
+        for start, finish in merge_spans(spans):
+            nxt = []
+            for c in pieces:
+                cs, ce = c["startFrame"], end(c)
+                if ce <= start or cs >= finish:
+                    nxt.append(c)
+                    continue
+                speed = c.get("speed", 1)
+                trim = c.get("trimStartFrame", 0)
+                if cs < start and ce > finish:
+                    right = copy.deepcopy(c)
+                    right["id"] = uid()
+                    right["trimStartFrame"] = trim + round((finish - cs) * speed)
+                    right["startFrame"] = finish
+                    right["durationFrames"] = ce - finish
+                    right["fadeInFrames"] = 0
+                    c["durationFrames"] = start - cs
+                    c["fadeOutFrames"] = 0
+                    nxt.extend([c, right])
+                elif cs < start:
+                    c["durationFrames"] = start - cs
+                    c["fadeOutFrames"] = 0
+                    nxt.append(c)
+                elif ce > finish:
+                    c["trimStartFrame"] = trim + round((finish - cs) * speed)
+                    c["startFrame"] = finish
+                    c["durationFrames"] = ce - finish
+                    c["fadeInFrames"] = 0
+                    nxt.append(c)
+                else:
+                    removed.append(c["id"])
+            pieces = nxt
+        return pieces
 
     def ripple_delete_ranges(self, ranges):
         if not ranges:
             raise ValueError("ranges must not be empty")
         def action():
-            removed, closed = [], 0
+            per_track = {}
             for r in ranges:
+                if not isinstance(r, dict):
+                    raise ValueError("Range must be an object")
                 index = integer(r.get("trackIndex", 0), "trackIndex")
                 start = integer(r.get("startFrame", 0), "startFrame")
-                finish = integer(r.get("endFrame", start + 1), "endFrame")
+                finish = integer(r["endFrame"], "endFrame") if "endFrame" in r else integer(r.get("endFrame", start + 1), "endFrame")
                 if finish <= start:
                     raise ValueError("endFrame must be after startFrame")
                 if index >= len(self.timeline["tracks"]):
                     raise ValueError("Unknown trackIndex")
+                per_track.setdefault(index, []).append((start, finish))
+                if self.timeline["tracks"][index].get("syncLocked", True):
+                    for other, track in enumerate(self.timeline["tracks"]):
+                        if other != index and track.get("syncLocked", True):
+                            per_track.setdefault(other, []).append((start, finish))
+            removed = []
+            for index, spans in per_track.items():
                 track = self.timeline["tracks"][index]
-                gap = finish - start
-                keep = []
-                for c in track["clips"]:
-                    c_end = end(c)
-                    if c_end <= start or c["startFrame"] >= finish:
-                        keep.append(c)
-                    elif c["startFrame"] < start and c_end > finish:
-                        right = copy.deepcopy(c)
-                        right["id"] = uid()
-                        right["startFrame"] = start
-                        right["durationFrames"] = c_end - finish
-                        right["trimStartFrame"] += round((finish - c["startFrame"]) * c.get("speed", 1))
-                        c["durationFrames"] = start - c["startFrame"]
-                        keep.extend([c, right])
-                        removed.append(right["id"] + "-split")
-                    elif c["startFrame"] < start:
-                        c["durationFrames"] = start - c["startFrame"]
-                        keep.append(c)
-                    elif c_end > finish:
-                        shift = finish - c["startFrame"]
-                        c["trimStartFrame"] += round(shift * c.get("speed", 1))
-                        c["startFrame"] = start
-                        c["durationFrames"] = c_end - finish
-                        keep.append(c)
-                    else:
-                        removed.append(c["id"])
-                track["clips"] = keep
-                for tr in self.timeline["tracks"]:
-                    if tr["id"] == track["id"] or tr.get("syncLocked", True):
-                        for c in tr["clips"]:
-                            if c["startFrame"] >= finish:
-                                c["startFrame"] -= gap
-                closed += gap
+                pieces = []
+                for clip in list(track["clips"]):
+                    pieces.extend(self._subtract_clip(clip, spans, removed))
+                for clip in pieces:
+                    clip["startFrame"] -= shift_before(clip["startFrame"], spans)
+                track["clips"] = sorted(pieces, key=lambda c: (c["startFrame"], c["id"]))
+            closed = max((sum(finish - start for start, finish in merge_spans(spans)) for spans in per_track.values()), default=0)
             return dict(removed=removed, closedFrames=closed)
         return self.mutate("Ripple delete", action)
 
@@ -684,14 +798,16 @@ class Editor:
                     raise ValueError("No compatible clips match the target selector")
             else:
                 raise ValueError("Specify targetClipIds or targetTrack")
-            changed = 0
+            changed_ids = []
             for c in targets:
-                if c["mediaType"] != src["mediaType"]:
+                if c["id"] == source_id or c["mediaType"] != src["mediaType"]:
                     continue
                 for k, v in portable.items():
                     c[k] = copy.deepcopy(v)
-                changed += 1
-            return dict(changed=changed, clipIds=[c["id"] for c in targets[:changed]])
+                changed_ids.append(c["id"])
+            if not changed_ids:
+                raise ValueError("No compatible clips match the target selector")
+            return dict(changed=len(changed_ids), clipIds=changed_ids)
         return self.mutate("Copy clip settings", action)
 
     def manage_clip_links(self, link=None, unlink=None):
@@ -714,17 +830,19 @@ class Editor:
         if not clip_ids:
             raise ValueError("clipIds must not be empty")
         def action():
-            if to_frame is None:
-                _, first = self.clip(clip_ids[0])
-                to_frame_local = first["startFrame"]
-            else:
-                to_frame_local = integer(to_frame, "toFrame")
+            chosen = []
             for cid in clip_ids:
-                tr, c = self.clip(cid)
-                delta = to_frame_local - c["startFrame"]
-                c["startFrame"] = to_frame_local
-                _ = tr, delta
-            return dict(clipIds=clip_ids, toFrame=to_frame_local)
+                chosen.append(self.clip(cid))
+            target = chosen[0][1]["startFrame"] if to_frame is None else integer(to_frame, "toFrame")
+            for _, c in chosen:
+                c["startFrame"] = target
+            for tr, c in chosen:
+                for other in tr["clips"]:
+                    if other is c:
+                        continue
+                    if other["startFrame"] < end(c) and end(other) > c["startFrame"]:
+                        raise ValueError("Sync would overlap clips on the same track")
+            return dict(clipIds=list(clip_ids), toFrame=target)
         return self.mutate("Sync clips", action)
 
     LAYOUTS = {
@@ -758,7 +876,7 @@ class Editor:
                     _, c = self.clip(cid)
                     if c["mediaType"] == "audio":
                         raise ValueError("Layouts apply to visual clips only")
-                    c["transform"].update(dict(centerX=cx, centerY=cy, width=w, height=h))
+                    c["transform"].update(dict(centerX=cx, centerY=cy, width=w, height=h, fit=fit))
                     if fit == "cover":
                         c["crop"] = dict(left=0.0, top=0.0, right=0.0, bottom=0.0)
                     touched.append(cid)
@@ -788,8 +906,12 @@ class Editor:
                     raise ValueError("Caption text must be 1..1000 characters")
                 c = clip_defaults("text", uid(), start, finish - start)
                 c["textContent"] = text
-                c["textStyle"] = dict(fontSize=(style or {}).get("fontSize", 64),
-                                      color=(style or {}).get("color", "#FFFFFF"))
+                import re
+                size = number((style or {}).get("fontSize", 64), "fontSize", 12, 300)
+                color = (style or {}).get("color", "#FFFFFF")
+                if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+                    raise ValueError("Text color must be #RRGGBB")
+                c["textStyle"] = dict(fontSize=size, color=color)
                 c["captionGroupId"] = group
                 self.overwrite(self.timeline["tracks"][index], start, finish)
                 self.timeline["tracks"][index]["clips"].append(c)
@@ -824,14 +946,23 @@ class Editor:
         return self.mutate("Apply color", action)
 
     def apply_effect(self, clip_ids, effects):
-        if not clip_ids or not effects:
-            raise ValueError("clipIds and effects must not be empty")
+        if not clip_ids:
+            raise ValueError("clipIds must not be empty")
+        if not isinstance(effects, list):
+            raise ValueError("effects must be a list")
         supported = {"grayscale", "blur", "sharpen", "vignette", "mirror", "denoise-light"}
         def action():
             for cid in clip_ids:
                 _, c = self.clip(cid)
+                if not effects:
+                    c["effects"] = []
+                    continue
+                if c["mediaType"] == "audio":
+                    raise ValueError("Effects apply to visual clips only")
                 stack = list(c.get("effects") or [])
                 for fx in effects:
+                    if not isinstance(fx, dict):
+                        raise ValueError("Effect must be an object")
                     ftype = fx.get("type")
                     if ftype not in supported:
                         raise ValueError("Unsupported effect: " + str(ftype))
@@ -839,7 +970,7 @@ class Editor:
                     stack = [e for e in stack if e.get("type") != ftype]
                     stack.append(dict(type=ftype, params=params))
                 c["effects"] = stack
-            return dict(clipIds=clip_ids)
+            return dict(clipIds=clip_ids, cleared=not effects)
         return self.mutate("Apply effect", action)
 
     def set_denoise(self, clip_ids, enabled=True, strength=0.6):
@@ -849,7 +980,9 @@ class Editor:
         def action():
             for cid in clip_ids:
                 _, c = self.clip(cid)
-                if c["mediaType"] != "audio" and c["mediaType"] not in ("video",):
+                media = self.media(c["mediaRef"]) if c.get("mediaType") != "text" else None
+                audible = c["mediaType"] == "audio" or bool(media and media.get("hasAudio"))
+                if not audible:
                     raise ValueError("Denoise applies to clips with audio")
                 c["denoise"] = None if not enabled else dict(strength=strength)
             return dict(clipIds=clip_ids, enabled=enabled)
@@ -867,19 +1000,27 @@ class Editor:
                     raise ValueError("Unknown keyframe track: " + name)
                 if not isinstance(keys, list) or not keys:
                     raise ValueError("Keyframe track must be a non-empty list")
+                cleaned = []
                 for k in keys:
-                    integer(k.get("frame", 0), "keyframe frame")
-                    if not math.isfinite(k.get("value", 0)):
-                        raise ValueError("Keyframe value must be finite")
-                store[name] = sorted(keys, key=lambda k: k["frame"])
+                    if not isinstance(k, dict):
+                        raise ValueError("Keyframe must be an object")
+                    frame, value = k.get("frame"), k.get("value")
+                    if type(frame) is not int:
+                        raise ValueError("Keyframe frame must be an integer")
+                    integer(frame, "keyframe frame")
+                    if isinstance(value, bool) or type(value) not in (int, float) or not math.isfinite(value):
+                        raise ValueError("Keyframe value must be a finite number")
+                    cleaned.append(dict(k, frame=frame, value=value))
+                store[name] = sorted(cleaned, key=lambda k: k["frame"])
             c["keyframes"] = store
             return dict(clipId=clip_id, tracks=sorted(store))
         return self.mutate("Set keyframes", action)
 
     def gaps(self, track_index):
-        track = self.timeline["tracks"][integer(track_index, "trackIndex")]
-        if integer(track_index, "trackIndex") >= len(self.timeline["tracks"]):
+        index = integer(track_index, "trackIndex")
+        if index >= len(self.timeline["tracks"]):
             raise ValueError("Unknown trackIndex")
+        track = self.timeline["tracks"][index]
         spans = sorted((c["startFrame"], end(c)) for c in track["clips"])
         out, cursor = [], 0
         for s, e in spans:
@@ -887,3 +1028,45 @@ class Editor:
                 out.append([cursor, s])
             cursor = max(cursor, e)
         return out
+
+    def duplicate_clips(self, clip_ids):
+        if not clip_ids:
+            raise ValueError("clipIds must not be empty")
+        def action():
+            created = []
+            for cid in list(clip_ids):
+                tr, c = self.clip(cid)
+                dup = copy.deepcopy(c)
+                dup["id"] = uid()
+                dup["linkGroupId"] = None
+                dup["startFrame"] = end(c)
+                self.overwrite(tr, dup["startFrame"], end(dup))
+                tr["clips"].append(dup)
+                created.append(dup["id"])
+            return dict(clipIds=created)
+        return self.mutate("Duplicate clips", action)
+
+    def relink_media(self, media_id, probed):
+        if not isinstance(probed, dict):
+            raise ValueError("Replacement media is invalid")
+        def action():
+            current = self.media(media_id)
+            if current is None:
+                raise ValueError("Unknown media id")
+            kind = probed.get("type")
+            if kind not in ("video", "audio", "image"):
+                raise ValueError("Unsupported media type")
+            if kind != current["type"] and not (kind in ("video", "image") and current["type"] in ("video", "image")):
+                raise ValueError("Replacement media type is incompatible")
+            source = probed.get("source")
+            if not isinstance(source, dict) or ("external" not in source and "project" not in source):
+                raise ValueError("Replacement media has no source")
+            current["source"] = copy.deepcopy(source)
+            current["name"] = probed.get("name", current["name"])
+            current["duration"] = number(probed.get("duration", 0), "duration", 0.01, 86400 * 24)
+            current["type"] = kind
+            for key in ("sourceWidth", "sourceHeight", "sourceFPS", "hasAudio"):
+                if key in probed:
+                    current[key] = probed[key]
+            return dict(mediaId=media_id, name=current["name"])
+        return self.mutate("Relink media", action)

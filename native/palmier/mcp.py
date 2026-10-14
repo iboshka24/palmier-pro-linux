@@ -3,7 +3,9 @@ import hmac
 import json
 import math
 import os
+import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from jsonschema import Draft202012Validator
@@ -50,7 +52,8 @@ SCHEMAS = {
     "capture_frame": obj(dict(frame=I, outputPath=S)),
     "add_clips": obj(dict(entries=array(obj(dict(mediaRef=S, trackIndex=I, startFrame=I, endFrame=I,
                                                  source=dict(type="array", items=N, minItems=2, maxItems=2)), ["mediaRef", "startFrame"]))), ["entries"]),
-    "insert_clips": obj(dict(atFrame=I, entries=array(obj(dict(mediaRef=S, trackIndex=I, startFrame=I, endFrame=I), ["mediaRef"]))), ["atFrame", "entries"]),
+    "insert_clips": obj(dict(atFrame=I, entries=array(obj(dict(mediaRef=S, trackIndex=I, startFrame=I, endFrame=I,
+                                                             source=dict(type="array", items=N, minItems=2, maxItems=2)), ["mediaRef"]))), ["atFrame", "entries"]),
     "move_clips": obj(dict(moves=array(obj(dict(clipId=S, toTrack=I, toFrame=I), ["clipId"]))), ["moves"]),
     "remove_clips": obj(dict(clipIds=array(S)), ["clipIds"]),
     "split_clips": obj(dict(splits=array(obj(dict(clipId=S, atFrame=I), ["clipId", "atFrame"]))), ["splits"]),
@@ -73,7 +76,8 @@ SCHEMAS = {
     "apply_layout": obj(dict(layout=dict(enum=["full", "side_by_side", "top_bottom", "pip_bottom_right", "pip_bottom_left",
                                                         "pip_top_right", "pip_top_left", "grid_2x2", "main_sidebar",
                                                         "three_up", "three_stack"]),
-                              slots=obj(), fit=dict(enum=["cover", "fit"])), ["layout", "slots"]),
+                              slots=dict(type="object", minProperties=1, additionalProperties=obj(dict(clipIds=array(S)), ["clipIds"])),
+                              fit=dict(enum=["cover", "fit"])), ["layout", "slots"]),
     "sync_clips": obj(dict(clipIds=array(S), toFrame=I), ["clipIds"]),
     "manage_clip_links": obj(dict(link=array(S), unlink=array(S))),
     "manage_tracks": obj(dict(set=array(obj(dict(trackId=S, index=I, muted=B, hidden=B, syncLocked=B, name=dict(type="string", maxLength=80)))),
@@ -84,7 +88,7 @@ SCHEMAS = {
     "add_captions": obj(dict(cues=array(obj(dict(startFrame=I, endFrame=I, text=S), ["startFrame", "endFrame", "text"])),
                               trackIndex=I, style=STYLE), ["cues"]),
     "apply_color": obj(dict(clipIds=array(S), color=GRADE, reset=B), ["clipIds"]),
-    "apply_effect": obj(dict(clipIds=array(S), effects=array(FX)), ["clipIds"]),
+    "apply_effect": obj(dict(clipIds=array(S), effects=dict(type="array", items=FX)), ["clipIds", "effects"]),
     "inspect_color": obj(dict(clipId=S, mediaRef=S)),
     "denoise_audio": obj(dict(clipIds=array(S), enabled=B, strength=N), ["clipIds"]),
     "remove_silence": obj(dict(trackIndex=I, thresholdDb=N, minLength=N), []),
@@ -180,6 +184,14 @@ class Tools:
                     raise ValueError("Import cancelled: active project changed")
                 e.import_entry(entry)
             return dict(mediaRef=entry["id"], status="ready")
+        if name == "capture_frame":
+            return self.capture_frame(args)
+        if name == "remove_silence":
+            return self.remove_silence(args)
+        if name == "list_models":
+            return self.list_models()
+        if name == "send_feedback":
+            return self.record_feedback(args.get("kind", ""), args.get("message", ""))
         with e.lock:
             if name in ("get_timeline", "inspect_timeline"):
                 return self.timeline_payload(e, args)
@@ -250,21 +262,6 @@ class Tools:
                             m["folder"] = mv.get("folder")
                     return dict(folders=list(folders))
                 return e.mutate("Organize media", action)
-            if name == "capture_frame":
-                from .media import capture_frame, frozen_editor
-                frame = args.get("frame", e.current_frame)
-                total = duration(e.timeline)
-                if not total:
-                    raise ValueError("The timeline is empty")
-                if not 0 <= frame < total:
-                    raise ValueError("frame must be inside the timeline")
-                dest = Path(args.get("outputPath") or f"/tmp/palmier-frame-{frame}.png").resolve()
-                if dest.suffix.lower() != ".png":
-                    raise ValueError("outputPath must end with .png")
-                snapshot = frozen_editor(e)
-                t = next(t for t in snapshot.doc["timelines"] if t["id"] == snapshot.doc["activeTimelineId"])
-                capture_frame(snapshot, t, frame, dest)
-                return dict(path=str(dest), frame=frame)
             if name == "insert_clips":
                 return e.insert_clips(args["atFrame"], args["entries"])
             if name == "ripple_delete_ranges":
@@ -309,34 +306,6 @@ class Tools:
                             hint="Place the asset, then grade the clip with apply_color.")
             if name == "denoise_audio":
                 return e.set_denoise(args["clipIds"], args.get("enabled", True), args.get("strength", 0.6))
-            if name == "remove_silence":
-                from .media import detect_silence
-                index = args.get("trackIndex", 0)
-                if index >= len(e.timeline["tracks"]):
-                    raise ValueError("Unknown trackIndex")
-                track = e.timeline["tracks"][index]
-                audio_clips = [c for c in track["clips"] if c["mediaType"] == "audio" or e.media(c["mediaRef"],)]
-                spans = []
-                for c in audio_clips:
-                    m = e.media(c["mediaRef"])
-                    if not m or m["type"] not in ("audio", "video"):
-                        continue
-                    try:
-                        path = e.media_path(m)
-                    except ValueError:
-                        continue
-                    if not path.is_file():
-                        continue
-                    for s0, s1 in detect_silence(path, args.get("thresholdDb", -35), args.get("minLength", 0.5)):
-                        f0 = c["startFrame"] + round((s0 - c.get("trimStartFrame", 0) / e.timeline["fps"]) * e.timeline["fps"])
-                        f1 = c["startFrame"] + round((s1 - c.get("trimStartFrame", 0) / e.timeline["fps"]) * e.timeline["fps"])
-                        f0 = max(c["startFrame"], f0)
-                        f1 = min(end(c), f1)
-                        if f1 - f0 >= round(e.timeline["fps"] * 0.2):
-                            spans.append(dict(trackIndex=index, startFrame=f0, endFrame=f1))
-                if not spans:
-                    return dict(removed=[], note="No silence spans found with current threshold")
-                return e.ripple_delete_ranges(spans)
             if name == "get_transcript":
                 return dict(words=[], note="Local speech transcription is not bundled in this Linux port. Use captions via add_captions or attach an SRT as captions.")
             if name == "detect_beats":
@@ -373,17 +342,9 @@ class Tools:
                             out.append(dict(clipId=c["id"], angle=c.get("multicamAngle", 0),
                                             frames=[c["startFrame"], end(c)]))
                 return dict(groupId=args.get("groupId"), clips=out)
-            if name == "list_models":
-                from .media import hw_encoders
-                return dict(canGenerate=False, localFilters=["grayscale", "blur", "sharpen", "vignette", "mirror", "denoise-light"],
-                            colorKnobs=["exposure", "contrast", "saturation", "temperature", "highlights", "shadows"],
-                            hwEncoders=hw_encoders(),
-                            note="Generative video/image/audio needs a Palmier subscription backend, which is not included in this GPL port.")
             if name in ("generate_video", "generate_image", "generate_audio", "upscale_media"):
                 return dict(canGenerate=False, status="refused",
                             note="Generation/upscale needs a Palmier subscription backend, not included in this GPL Linux port. Timeline editing, color, effects and export work offline.")
-            if name == "send_feedback":
-                return dict(status="recorded", note="Feedback is kept locally in this port; email founders@palmier.io for upstream contact.")
             if name == "add_clips":
                 return e.add_clips(args["entries"])
             if name == "move_clips":
@@ -405,9 +366,19 @@ class Tools:
                         if c["mediaType"] != "text":
                             raise ValueError("Target is not a text clip")
                         if "content" in args:
+                            if not isinstance(args["content"], str) or len(args["content"]) > 10000:
+                                raise ValueError("Text must be a string up to 10000 characters")
                             c["textContent"] = args["content"]
                         if "style" in args:
-                            c.setdefault("textStyle", {}).update(args["style"])
+                            style = args["style"]
+                            if "fontSize" in style:
+                                from .model import number
+                                number(style["fontSize"], "fontSize", 12, 300)
+                            if "color" in style:
+                                import re
+                                if not re.fullmatch(r"#[0-9a-fA-F]{6}", style["color"]):
+                                    raise ValueError("Text color must be #RRGGBB")
+                            c.setdefault("textStyle", {}).update(style)
                     return dict(clipIds=args["clipIds"])
                 return e.mutate("Update text", action)
             if name in ("undo", "windows_redo", "linux_redo"):
@@ -477,6 +448,80 @@ class Tools:
                 self.playback(args["action"], args.get("frame", e.current_frame))
                 return dict(status="requested")
         raise ValueError("Unsupported operation")
+
+    def capture_frame(self, args):
+        from .media import capture_frame, frozen_editor
+        e = self.editor
+        with e.lock:
+            frame = args.get("frame", e.current_frame)
+            total = duration(e.timeline)
+            if not total:
+                raise ValueError("The timeline is empty")
+            if type(frame) is not int or not 0 <= frame < total:
+                raise ValueError("frame must be inside the timeline")
+            snapshot = frozen_editor(e)
+            timeline = next(t for t in snapshot.doc["timelines"] if t["id"] == snapshot.doc["activeTimelineId"])
+        if args.get("outputPath"):
+            dest = Path(args["outputPath"]).expanduser().resolve()
+        else:
+            dest = Path(tempfile.gettempdir()) / f"palmier-frame-{uid()}.png"
+        if dest.suffix.lower() != ".png":
+            raise ValueError("outputPath must end with .png")
+        capture_frame(snapshot, timeline, frame, dest)
+        return dict(path=str(dest), frame=frame)
+
+    def remove_silence(self, args):
+        from .media import detect_silence, timeline_silence_ranges
+        e = self.editor
+        with e.lock:
+            index = args.get("trackIndex", 0)
+            if type(index) is not int or index >= len(e.timeline["tracks"]):
+                raise ValueError("Unknown trackIndex")
+            fps = e.timeline["fps"]
+            jobs = []
+            for c in e.timeline["tracks"][index]["clips"]:
+                m = e.media(c["mediaRef"])
+                if not m or m.get("type") not in ("audio", "video"):
+                    continue
+                if m.get("type") != "audio" and not m.get("hasAudio"):
+                    continue
+                try:
+                    path = e.media_path(m)
+                except ValueError:
+                    continue
+                if path.is_file():
+                    jobs.append((copy.deepcopy(c), path))
+            threshold = args.get("thresholdDb", -35)
+            minimum = args.get("minLength", 0.5)
+        spans = []
+        min_frames = max(1, round(fps * 0.2))
+        for clip, path in jobs:
+            for span in timeline_silence_ranges(clip, detect_silence(path, threshold, minimum), fps, index, min_frames):
+                spans.append(span)
+        if not spans:
+            return dict(removed=[], note="No silence spans found with current threshold")
+        return e.ripple_delete_ranges(spans)
+
+    def list_models(self):
+        from .media import hw_encoders
+        return dict(canGenerate=False, localFilters=["grayscale", "blur", "sharpen", "vignette", "mirror", "denoise-light"],
+                    colorKnobs=["exposure", "contrast", "saturation", "temperature", "highlights", "shadows", "sharpen"],
+                    hwEncoders=hw_encoders(),
+                    note="Generative video/image/audio needs a Palmier subscription backend, which is not included in this GPL port.")
+
+    def record_feedback(self, kind, message):
+        if not isinstance(kind, str) or not isinstance(message, str):
+            raise ValueError("Feedback kind and message must be strings")
+        message = message.strip()
+        if not message or len(message) > 4000:
+            raise ValueError("Feedback message must be 1..4000 characters")
+        root = Path(os.environ.get("PALMIER_FEEDBACK_DIR") or (Path.home() / ".local" / "share" / "palmier-pro-linux"))
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / "feedback.jsonl"
+        line = json.dumps(dict(kind=kind.strip()[:40] or "note", message=message, at=time.time()), ensure_ascii=False)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+        return dict(status="recorded", path=str(path), note="Feedback is stored on this computer only.")
 
     def project(self, args):
         e, action = self.editor, args["action"]

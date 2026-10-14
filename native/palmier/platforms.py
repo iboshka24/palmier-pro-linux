@@ -1,6 +1,8 @@
 import os
 import platform
 import shutil
+import subprocess
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -8,11 +10,30 @@ def desktop_name():
     return "Palmier Pro Linux" if os.name != "nt" else "Palmier Pro Windows"
 
 
+def _font_families():
+    if os.name == "nt":
+        return set()
+    try:
+        out = subprocess.run(["fc-list", ":family"], capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    families = set()
+    for line in out.stdout.splitlines():
+        for part in line.split(","):
+            name = part.strip().lower()
+            if name:
+                families.add(name)
+    return families
+
+
+@lru_cache(maxsize=1)
 def ui_font():
     if os.name == "nt":
         return "Segoe UI"
-    for family in ("Inter", "DejaVu Sans", "Liberation Sans", "Noto Sans"):
-        return family
+    available = _font_families()
+    for family in ("Inter", "DejaVu Sans", "Liberation Sans", "Noto Sans", "Ubuntu", "Cantarell"):
+        if family.lower() in available:
+            return family
     return "DejaVu Sans"
 
 
@@ -21,8 +42,14 @@ def session_type():
 
 
 def hw_hint():
-    encoders = []
     ffmpeg = shutil.which("ffmpeg")
+    encoders = []
+    if ffmpeg:
+        try:
+            from .media import hw_encoders
+            encoders = list(hw_encoders())
+        except Exception:
+            encoders = []
     return dict(session=session_type(), ffmpeg=bool(ffmpeg),
                 vaapi=Path("/dev/dri").exists(), encoders=encoders)
 
