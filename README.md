@@ -1,56 +1,94 @@
-# Palmier Pro — Windows development port
+# Palmier Pro Linux — улучшенный Linux-форк 0.4.0
 
-## Native Windows application (new)
+Нативный Qt 6 видеоредактор для Linux, развивающий
+[compotik2/palmier-pro-windows](https://github.com/compotik2/palmier-pro-windows)
+с портированием функций из [palmier-io/palmier-pro](https://github.com/palmier-io/palmier-pro)
+(`last-gpl-source`, v0.7.6, GPLv3) и переработанным дизайном.
 
-The native **Qt 6 desktop port for Windows and Linux** is in [`native/`](native/README.md).
-It has a real Windows window, timeline editing, FFmpeg composition/export,
-native multimedia playback and MCP integration. Download the portable native
-prerelease from [Releases](https://github.com/compotik2/palmier-pro-windows/releases).
-Linux build and launch instructions: [`native/LINUX.md`](native/LINUX.md).
-OpenCode connects to the running editor using the local HTTP MCP endpoint.
+Исходник: [`native/`](native/README.md) — Python + PySide6 + FFmpeg, MCP на
+`http://127.0.0.1:19789/mcp`. Это неполный GPL-порт, а не 1:1 копия macOS-версии.
 
-**This project is incomplete, not pixel-perfect and not a 1:1 port.** See the
-accurate [compatibility table](native/README.md#compatibility--validation-scope),
-[migration analysis](native/docs/MIGRATION.md), [LICENSE](LICENSE) and [NOTICE](NOTICE).
-The previous Node/browser implementation below is a historical experiment;
-its 1-to-1/stub claims do not describe verified native functionality.
+## Что нового в 0.4.0-linux
 
----
+**Больше функций из оригинала (53 MCP-инструмента вместо 20):**
+- `inspect_timeline` — богатое чтение: гэпы, маркеры, transform/crop/color/effects, ссылки
+- `manage_markers` — маркеры-рецензии (создание/правка/удаление)
+- `inspect_media`, `search_media`, `organize_media` — папки и поиск по библиотеке
+- `insert_clips` (ripple-вставка со сдвигом sync-locked дорожек), `ripple_delete_ranges`
+- `swap_clip_media`, `copy_clip_settings`, `manage_clip_links`, `sync_clips`
+- `set_keyframes` (хранение), `apply_layout` — full / side-by-side / top-bottom / 4×PiP / grid 2×2 / sidebar / three-up / three-stack
+- `add_captions` (группы субтитров), `capture_frame` (PNG кадра)
+- `apply_color` (exposure/contrast/saturation/temperature/highlights/shadows — рендерится через FFmpeg `eq`/`colorbalance`), `inspect_color`
+- `apply_effect` (grayscale/blur/sharpen/vignette/mirror/denoise-light — реально рендерится), `denoise_audio` (`afftdn`)
+- `remove_silence` (по `silencedetect` + ripple), `manage_multicam` / `change_cam` / `get_multicam`
+- `list_models` (честные локальные фильтры + найденные HW-энкодеры), генерация — честный `canGenerate:false`
+- `linux_playback` / `linux_redo` (алиасы к `windows_*` для совместимости)
+- Трансформы и кроп теперь **рендерятся** (слот + overlay-позиция, rotate, flip), а не отвергаются
 
-## Historical Node/browser experiment
+**Дизайн:**
+- Тёмная Linux-тема: фон `#0F1115`, панели `#14171D`, акцент `#4C7DFF`, скругления 8–12px
+- Таймлайн: дорожка маркеров, бейджи `● fx 🔗 🎧`, fade-треугольники, ruler `мм:сс`, красный плейхед с флажком
+- Инспектор: Clip + Color (exposure/contrast/saturation/temperature) + FX + Denoise + текст
+- Тулбар: Marker, CC, Layout; превью с закруглёнными углами; моноширинный таймкод
 
-Windows reimplementation of [palmier-io/palmier-pro](https://github.com/palmier-io/palmier-pro) (`last-gpl-source`, v0.7.6, GPLv3).
+**Linux:**
+- X11 и XWayland, PipeWire/Pulse через Qt Multimedia, VA-API/NVENC детект с fallback
+- `.desktop` файл, `PALMIER_FONT_PATH`, понятные ошибки про FFmpeg/шрифты
+- PySide6 без жёсткого пина (6.8+), FFmpeg 4.4+ / 7.x (обе ветки `filter_complex`)
 
-Original is Swift 6.2, SwiftUI + AppKit, AVFoundation, Metal, macOS 26 arm64 only (415 Swift files).
-It cannot compile or run on Windows. This port keeps the product contract identical where it matters:
+## Запуск (Ubuntu 22.04+)
 
-- Same MCP endpoint: `http://127.0.0.1:19789/mcp`
-- Same 50 tool names from `ToolDefinitions.swift` (`manage_project`, `get_timeline`, `add_clips`, ...)
-- Same timeline math: clips occupy `[start, end)`, end exclusive
-- Same project concepts: projects > timelines > tracks (`trackId`) > clips, markers, media library, exports
-- Same install strings: `claude mcp add --transport http palmier-pro http://127.0.0.1:19789/mcp`
-
-## Run on Windows
-
-```powershell
-npm install
-npm start
-# UI: http://127.0.0.1:19789/
-# MCP: http://127.0.0.1:19789/mcp
+```bash
+sudo apt-get update
+sudo apt-get install ffmpeg fonts-liberation fonts-dejavu-core \
+  libegl1 libopengl0 libgl1 libxcb-cursor0 libxkbcommon-x11-0
+git clone https://github.com/iboshka24/palmier-pro-linux.git
+cd palmier-pro-linux/native
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python main.py
 ```
 
-Requires Node 18+ and `ffmpeg` on PATH (`winget install Gyan.FFmpeg`).
+Подробно: [`native/LINUX.md`](native/LINUX.md).
 
-## Mapping (macOS -> Windows)
+## MCP / AI
 
-| macOS original | Windows port |
+Откройте редактор, затем в OpenCode:
+
+```json
+"palmier-pro": { "type": "remote", "url": "http://127.0.0.1:19789/mcp", "enabled": true }
+```
+
+```bash
+codex mcp add palmier-pro --url http://127.0.0.1:19789/mcp
+```
+
+Loopback-only, строгий Host, запрет browser Origin, лимит 1 МиБ.
+Опционально `PALMIER_MCP_TOKEN` → `Authorization: Bearer TOKEN`.
+
+## Совместимость
+
+| Возможность | Состояние 0.4.0 |
 |---|---|
-| AVFoundation decode/encode | FFmpeg |
-| Metal / CoreImage preview | HTML canvas + ffmpeg `testsrc`/thumbnails |
-| AppKit NSDocument `.palmier` | JSON `data/projects/*.json` |
-| Swift MCP SDK server | Node Express JSON-RPC `tools/list`, `tools/call` |
-| MLX / speech / generation | stubs (`canGenerate:false`, same receipts) |
+| Мультитрек V/A, move/split/trim/undo | ✅ + тесты |
+| Маркеры, ripple insert/delete, swap, copy settings, links, sync | ✅ |
+| Трансформ/кроп, цвет, эффекты, denoise | ✅ рендер через FFmpeg |
+| Раскладки PiP/split/grid, субтитры, keyframes (хранение) | ✅ |
+| Captions из оригинала, bead/speech-модели, Lottie, keyframe-анимация в рендере | ❌ честный отказ |
+| Генерация (Seedance/Kling и т.д.), подписка Palmier | ❌ `canGenerate:false`, бэкенда нет в GPL |
+| Linked AV как в оригинале, ripple-мультикам, nested timelines | ⚠️ частично (linkGroupId, multicam-группы базовые) |
 
-## License
+Подробнее: [`native/README.md`](native/README.md), [`native/docs/MIGRATION.md`](native/docs/MIGRATION.md).
 
-GPLv3 (same as upstream source through `last-gpl-source`).
+## Проверка
+
+```bash
+cd native
+python3 -m unittest discover -s tests -v
+QT_QPA_PLATFORM=offscreen python3 -c "from palmier.ui import Window; print('UI OK')"
+```
+
+## Лицензия
+
+GPLv3. Оригинал: Palmier, Inc. (`last-gpl-source`, коммит `8805801`).
+Windows-порт: compotik2. Linux-форк: iboshka24. См. LICENSE, NOTICE,
+`native/docs/THIRD_PARTY.md`.

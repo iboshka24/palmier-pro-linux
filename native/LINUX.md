@@ -1,46 +1,56 @@
-# Palmier Pro Linux 0.3.0 — native development port
+# Palmier Pro Linux 0.4.0 — запуск и сборка
 
-Native Qt 6 Widgets application using the same project model, timeline editor,
-FFmpeg render/export pipeline and local MCP server as the Windows build.
-This remains an incomplete GPL-source Palmier port, not feature-complete or
-pixel-perfect. See README compatibility table and root LICENSE/NOTICE.
+Нативный Qt 6 Widgets редактор: модель проекта, таймлайн, FFmpeg рендер/экспорт
+и локальный MCP-сервер. Неполный GPL-порт Palmier, не pixel-perfect.
+См. корневой README (таблица совместимости), LICENSE/NOTICE.
 
-## Supported packaging profile
+## Поддерживаемый профиль
 
-- Linux **x86_64**, built on Ubuntu 22.04 (glibc 2.35).
-- Ubuntu 22.04+ is the initial target; other distributions require compatible
-  glibc, graphics/audio libraries and media tools. ARM Linux is not packaged.
-- X11, or an XWayland session. Native Wayland is not certified.
-- FFmpeg/FFprobe **4.4 or newer**, with drawtext, libx264 and libx265.
-- Liberation Sans or DejaVu Sans system font. Set `PALMIER_FONT_PATH` to an
-  absolute TTF path to use another installed font.
+- Linux **x86_64**, Ubuntu 22.04+ (glibc 2.35). Другие дистрибутивы — при совместимых
+  glibc, графических/аудио библиотеках и FFmpeg. ARM не пакуется.
+- X11 или XWayland (`echo $XDG_SESSION_TYPE`). Чистый Wayland без XWayland не сертифицирован.
+- FFmpeg/FFprobe **4.4+** с drawtext, libx264, libx265. Проверены ветки 4.x–9.x.
+- Шрифт Liberation Sans / DejaVu Sans. `PALMIER_FONT_PATH=/путь/к.ttf` — свой шрифт.
+- Аудио: PipeWire/Pulse через Qt Multimedia. Видео: Qt Multimedia + CPU-презентация;
+  NVENC/VA-API пробуются при экспорте с fallback на софт.
 
-The portable archive includes Python, PySide6/Qt and its shared decoder
-libraries. FFmpeg/FFprobe command-line executables remain external.
+Портативный архив включает Python, PySide6/Qt и декодерные библиотеки.
+FFmpeg/FFprobe — внешние, ставятся отдельно.
 
-## Install and launch (Ubuntu)
+## Установка и запуск (Ubuntu)
 
 ```bash
 sudo apt-get update
-sudo apt-get install ffmpeg fonts-liberation fonts-dejavu-core libegl1 libopengl0 libgl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0
-tar -xzf PalmierProLinux-0.3.0-linux-x86_64-portable.tar.gz
+sudo apt-get install ffmpeg fonts-liberation fonts-dejavu-core \
+  libegl1 libopengl0 libgl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+  libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0
+tar -xzf PalmierProLinux-0.4.0-linux-x86_64-portable.tar.gz
 cd PalmierProLinux
 ./PalmierProLinux
 ```
 
-Extract the entire directory; `_internal` must stay next to the executable.
-An optional `.desktop` entry is included. To use it, place the executable on
-PATH (for example with a symlink in `~/.local/bin`) and copy the entry into
-`~/.local/share/applications`. The tar archive preserves executable permissions.
+Не разносите бинарник и `_internal`. Для `.desktop`:
 
-Editor shortcuts use Ctrl. Projects are directory packages ending `.palmier`.
-Linux imports store POSIX absolute paths; project-relative `media/` references
-use the same original schema as Windows/macOS. Windows drive-letter paths need
-relinking before use on Linux; a relink UI is not implemented.
+```bash
+mkdir -p ~/.local/bin ~/.local/share/applications
+ln -sf "$PWD/PalmierProLinux" ~/.local/bin/
+cp palmier-pro-linux.desktop ~/.local/share/applications/
+```
 
-## Connect OpenCode
+Горячие клавиши — Ctrl. Проекты — каталоги `.palmier`. Импорты хранят абсолютные
+POSIX-пути; Windows пути с буквой диска нужно перелинковать вручную.
 
-Keep Palmier open. Merge this entry into `~/.config/opencode/opencode.jsonc`:
+При проблемах:
+
+```bash
+./PalmierProLinux --verify-media --output /tmp/media.json
+ffmpeg -version && ffprobe -version
+echo $XDG_SESSION_TYPE
+```
+
+## OpenCode
+
+Держите редактор открытым, в `~/.config/opencode/opencode.jsonc`:
 
 ```json
 {
@@ -55,37 +65,31 @@ Keep Palmier open. Merge this entry into `~/.config/opencode/opencode.jsonc`:
 }
 ```
 
-Preserve other entries, restart OpenCode and run `opencode mcp list`.
-Ask: "Use palmier-pro to inspect the active project and arrange the imported
-media into a 20-second timeline." OpenCode uses the user's own configured AI
-provider; no OpenAI API key is required by Palmier for external MCP control.
-The in-app OpenAI BYOK chat is a separate integration.
+Перезапустите OpenCode, проверьте `opencode mcp list`.
+53 инструмента: маркеры, ripple, раскладки, субтитры, цвет, эффекты, denoise,
+ссылки, кейфреймы, `capture_frame`. Генерация честно отвечает `canGenerate:false`.
 
-Loopback-only HTTP, strict Host validation and browser-Origin rejection apply.
-Optional `PALMIER_MCP_TOKEN` requires an Authorization Bearer header configured
-in the AI client. Only implemented original tool subsets are advertised.
+Loopback-only, строгий Host, отказ browser Origin. `PALMIER_MCP_TOKEN` включает
+Bearer-авторизацию.
 
-## Build from source
+## Сборка из исходников
 
-Install Python 3.11 x64 and venv support plus the runtime dependencies above:
+Нужны Python 3.11+ и зависимости выше:
 
 ```bash
-git clone https://github.com/compotik2/palmier-pro-windows.git
-cd palmier-pro-windows/native
-python3.11 -m venv .venv
-.venv/bin/python -m pip install -r requirements-lock.txt
+git clone https://github.com/iboshka24/palmier-pro-linux.git
+cd palmier-pro-linux/native
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python main.py
 .venv/bin/python -m unittest discover -s tests -v
 .venv/bin/python scripts/build.py
 ./dist/PalmierProLinux/PalmierProLinux --verify-media --output test-output/media.json
 ```
 
-Output: `dist/PalmierProLinux/PalmierProLinux` and
-`dist/PalmierProLinux-0.3.0-linux-x86_64-portable.tar.gz` with SHA256SUMS.
-`bash build.sh` runs tests, packaging and the desktop/media check in an existing
-graphical session. Node.js 24 is optional for `mcp-client` SDK verification.
+`bash build.sh` — тесты + упаковка + проверки в графической сессии.
+Node.js 24 опционален для `mcp-client` проверки.
 
-GitHub Actions uses Ubuntu 22.04 and Xvfb with a null audio sink to execute the
-packaged native window, mouse/keyboard editing, visible video playback and
-source/media tests. That verifies automated behavior under a virtual X11
-display, not human audio listening, Wayland or all Linux distributions.
+GitHub Actions: Ubuntu 22.04 + Xvfb + null-аудио — окно, мышь/клавиатура,
+видимый плейбэк, source/media тесты. Живой звук, Wayland и все дистрибутивы
+автоматически не покрываются.

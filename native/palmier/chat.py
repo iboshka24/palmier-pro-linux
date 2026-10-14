@@ -10,7 +10,7 @@ def converse(prompt, tools, model="gpt-4.1-mini"):
     declarations = [dict(type="function", name=t["name"], description=t["description"], parameters=t["inputSchema"])
                     for t in tools.list() if t["name"] not in ("manage_project", "import_media", "export_project")]
     allowed = {tool["name"] for tool in declarations}
-    messages = [dict(role="system", content="You assist a filmmaker in Palmier Windows. Only supported tools are available. Never claim generation or unsupported effects work. External imports, exports and project switching require the desktop or an external MCP client."),
+    messages = [dict(role="system", content="You assist a filmmaker in Palmier Pro Linux. Only supported tools are available. Never claim generation or unsupported effects work. External imports, exports and project switching require the desktop or an external MCP client."),
                 dict(role="user", content=prompt)]
     transcript = []
     for _ in range(8):

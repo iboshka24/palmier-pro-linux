@@ -30,26 +30,75 @@ I = dict(type="integer", minimum=0, maximum=100_000_000)
 N = dict(type="number")
 B = dict(type="boolean")
 STYLE = obj(dict(fontSize=dict(type="number", minimum=12, maximum=300), color=dict(type="string", pattern=r"^#[0-9a-fA-F]{6}$")))
+GRADE = obj(dict(exposure=N, contrast=N, saturation=N, temperature=N, highlights=N, shadows=N, sharpen=N))
+FX = obj(dict(type=dict(enum=["grayscale", "blur", "sharpen", "vignette", "mirror", "denoise-light"]),
+              sigma=N, amount=N), ["type"])
 SCHEMAS = {
     "manage_project": obj(dict(action=dict(enum=["list", "open", "create", "close"]), name=S, id=S, path=S, fps=I,
                                aspectRatio=dict(enum=["16:9", "9:16", "1:1", "4:3"]), quality=dict(enum=["720p", "1080p", "2K", "4K"])), ["action"]),
     "get_timeline": obj(dict(startFrame=I, endFrame=I, captionDetail=B)),
+    "inspect_timeline": obj(dict(startFrame=I, endFrame=I, captionDetail=B)),
+    "manage_markers": obj(dict(create=array(obj(dict(startFrame=I, durationFrames=I, name=S, comment=S, color=S))),
+                                update=array(obj(dict(markerId=S, startFrame=I, durationFrames=I, name=S, comment=S))),
+                                remove=array(S))),
     "get_media": obj(dict(ids=array(S), folder=S, pending=B)),
+    "inspect_media": obj(dict(ids=array(S)), ["ids"]),
+    "search_media": obj(dict(query=S, limit=I), ["query"]),
+    "organize_media": obj(dict(createFolders=array(S), rename=array(obj(dict(folder=S, name=S), ["folder", "name"])),
+                                move=array(obj(dict(ids=array(S), folder=S), ["ids"])))),
     "import_media": obj(dict(source=obj(dict(path=S), ["path"]), name=S), ["source"]),
+    "capture_frame": obj(dict(frame=I, outputPath=S)),
     "add_clips": obj(dict(entries=array(obj(dict(mediaRef=S, trackIndex=I, startFrame=I, endFrame=I,
                                                  source=dict(type="array", items=N, minItems=2, maxItems=2)), ["mediaRef", "startFrame"]))), ["entries"]),
+    "insert_clips": obj(dict(atFrame=I, entries=array(obj(dict(mediaRef=S, trackIndex=I, startFrame=I, endFrame=I), ["mediaRef"]))), ["atFrame", "entries"]),
     "move_clips": obj(dict(moves=array(obj(dict(clipId=S, toTrack=I, toFrame=I), ["clipId"]))), ["moves"]),
     "remove_clips": obj(dict(clipIds=array(S)), ["clipIds"]),
     "split_clips": obj(dict(splits=array(obj(dict(clipId=S, atFrame=I), ["clipId", "atFrame"]))), ["splits"]),
+    "ripple_delete_ranges": obj(dict(ranges=array(obj(dict(trackIndex=I, startFrame=I, endFrame=I), ["startFrame", "endFrame"]))), ["ranges"]),
+    "swap_clip_media": obj(dict(swaps=array(obj(dict(clipId=S, mediaRef=S), ["clipId", "mediaRef"]))), ["swaps"]),
+    "copy_clip_settings": obj(dict(sourceClipId=S, targetClipIds=array(S), targetTrack=S, startFrame=I, endFrame=I), ["sourceClipId"]),
     "set_clip_properties": obj(dict(clipIds=array(S), durationFrames=I, trimStartFrame=I, trimEndFrame=I,
                                      speed=dict(type="number", minimum=.05, maximum=16),
                                      volumeDb=dict(type="number", minimum=-60, maximum=15),
-                                     opacity=dict(type="number", minimum=0, maximum=1), fadeInFrames=I, fadeOutFrames=I), ["clipIds"]),
+                                     opacity=dict(type="number", minimum=0, maximum=1), fadeInFrames=I, fadeOutFrames=I,
+                                     edgeRounding=N, edgeSoftness=N,
+                                     transform=obj(dict(centerX=N, centerY=N, width=N, height=N, rotation=N, flipHorizontal=B, flipVertical=B)),
+                                     crop=obj(dict(left=N, top=N, right=N, bottom=N))), ["clipIds"]),
+    "set_keyframes": obj(dict(clipId=S, tracks=obj(dict(opacity=array(obj(dict(frame=I, value=N), ["frame", "value"])),
+                                                              volume=array(obj(dict(frame=I, value=N), ["frame", "value"])),
+                                                              rotation=array(obj(dict(frame=I, value=N), ["frame", "value"])),
+                                                              scale=array(obj(dict(frame=I, value=N), ["frame", "value"])),
+                                                              position=array(obj(dict(frame=I, value=N), ["frame", "value"])),
+                                                              crop=array(obj(dict(frame=I, value=N), ["frame", "value"]))))), ["clipId", "tracks"]),
+    "apply_layout": obj(dict(layout=dict(enum=["full", "side_by_side", "top_bottom", "pip_bottom_right", "pip_bottom_left",
+                                                        "pip_top_right", "pip_top_left", "grid_2x2", "main_sidebar",
+                                                        "three_up", "three_stack"]),
+                              slots=obj(), fit=dict(enum=["cover", "fit"])), ["layout", "slots"]),
+    "sync_clips": obj(dict(clipIds=array(S), toFrame=I), ["clipIds"]),
+    "manage_clip_links": obj(dict(link=array(S), unlink=array(S))),
     "manage_tracks": obj(dict(set=array(obj(dict(trackId=S, index=I, muted=B, hidden=B, syncLocked=B, name=dict(type="string", maxLength=80)))),
                                reorder=array(obj(dict(trackId=S, index=I, to=I), ["to"])),
                                remove=array(dict(oneOf=[I, obj(dict(trackId=S), ["trackId"])])))),
     "add_texts": obj(dict(entries=array(obj(dict(trackIndex=I, startFrame=I, endFrame=I, content=S, style=STYLE), ["startFrame", "endFrame", "content"]))), ["entries"]),
     "update_text": obj(dict(clipIds=array(S), content=S, style=STYLE), ["clipIds"]),
+    "add_captions": obj(dict(cues=array(obj(dict(startFrame=I, endFrame=I, text=S), ["startFrame", "endFrame", "text"])),
+                              trackIndex=I, style=STYLE), ["cues"]),
+    "apply_color": obj(dict(clipIds=array(S), color=GRADE, reset=B), ["clipIds"]),
+    "apply_effect": obj(dict(clipIds=array(S), effects=array(FX)), ["clipIds"]),
+    "inspect_color": obj(dict(clipId=S, mediaRef=S)),
+    "denoise_audio": obj(dict(clipIds=array(S), enabled=B, strength=N), ["clipIds"]),
+    "remove_silence": obj(dict(trackIndex=I, thresholdDb=N, minLength=N), []),
+    "get_transcript": obj(dict(trackIndex=I, startFrame=I, endFrame=I, granularity=dict(enum=["words", "segments"]))),
+    "detect_beats": obj(dict(trackIndex=I)),
+    "manage_multicam": obj(dict(action=dict(enum=["create", "disband"]), clipIds=array(S), groupId=S), ["action"]),
+    "change_cam": obj(dict(groupId=S, angle=I, startFrame=I, endFrame=I), ["groupId", "angle"]),
+    "get_multicam": obj(dict(groupId=S)),
+    "list_models": obj(),
+    "generate_video": obj(dict(prompt=S, duration=N)),
+    "generate_image": obj(dict(prompt=S)),
+    "generate_audio": obj(dict(prompt=S)),
+    "upscale_media": obj(dict(mediaRef=S)),
+    "send_feedback": obj(dict(kind=S, message=S)),
     "undo": obj(),
     "create_timeline": obj(dict(name=S)),
     "set_active_timeline": obj(dict(timelineId=S), ["timelineId"]),
@@ -59,7 +108,9 @@ SCHEMAS = {
                                outputPath=S, overwrite=B, timelineId=S, bitrateMbps=dict(type="number", minimum=.1, maximum=200), hardware=B)),
     "manage_exports": obj(dict(action=dict(enum=["list", "cancel"]), jobId=S), ["action"]),
     "windows_playback": obj(dict(action=dict(enum=["play", "pause", "seek"]), frame=I), ["action"]),
+    "linux_playback": obj(dict(action=dict(enum=["play", "pause", "seek"]), frame=I), ["action"]),
     "windows_redo": obj(),
+    "linux_redo": obj(),
 }
 
 
@@ -72,9 +123,39 @@ class Tools:
     def list(self):
         result = []
         for name, schema in SCHEMAS.items():
-            result.append(dict(name=name, description=("Windows extension. " if name.startswith("windows_") else "GPL Palmier tool name; supported Windows subset. ") +
+            if name.startswith(("windows_", "linux_")):
+                prefix = "Linux extension. " if name.startswith("linux_") else "Windows extension (kept for compatibility). "
+            else:
+                prefix = "GPL Palmier tool name; supported Linux subset. "
+            result.append(dict(name=name, description=prefix +
                                f"{name.replace('_',' ')}. Only properties in this schema are implemented; unsupported original modes fail without mutation.", inputSchema=schema))
         return result
+
+    def timeline_payload(self, e, args):
+        t = copy.deepcopy(e.timeline)
+        start, finish = args.get("startFrame", 0), args.get("endFrame", 100_000_000)
+        if finish < start:
+            raise ValueError("endFrame precedes startFrame")
+        tracks = []
+        for index, tr in enumerate(t["tracks"]):
+            clips = []
+            for c in tr["clips"]:
+                if end(c) > start and c["startFrame"] < finish:
+                    m = e.media(c["mediaRef"])
+                    clips.append(dict(id=c["id"], mediaRef=c["mediaRef"], type=c["mediaType"],
+                                      frames=[c["startFrame"], end(c)], name=m["name"] if m else c.get("textContent", "Missing media"),
+                                      speed=c.get("speed", 1), opacity=c.get("opacity", 1),
+                                      volumeDb=20*math.log10(max(c.get("volume", 1), .001)),
+                                      transform=c.get("transform"), crop=c.get("crop"),
+                                      color=c.get("color"), effects=c.get("effects"),
+                                      linkGroupId=c.get("linkGroupId"),
+                                      text=c.get("textContent") if c["mediaType"] == "text" else None))
+            tracks.append(dict(trackId=tr["id"], index=index, type=tr["type"], name=tr.get("name"),
+                               muted=tr.get("muted", False), hidden=tr.get("hidden", False),
+                               syncLocked=tr.get("syncLocked", True), clips=clips,
+                               gaps=e.gaps(index)))
+        return dict(id=t["id"], name=t["name"], fps=t["fps"], width=t["width"], height=t["height"],
+                    currentFrame=e.current_frame, canGenerate=False, tracks=tracks, markers=t.get("markers", []))
 
     def call(self, name, args):
         if name not in SCHEMAS:
@@ -100,41 +181,209 @@ class Tools:
                 e.import_entry(entry)
             return dict(mediaRef=entry["id"], status="ready")
         with e.lock:
-            if name == "get_timeline":
-                t = copy.deepcopy(e.timeline)
-                start, finish = args.get("startFrame", 0), args.get("endFrame", 100_000_000)
-                if finish < start:
-                    raise ValueError("endFrame precedes startFrame")
-                tracks = []
-                for index, tr in enumerate(t["tracks"]):
-                    clips = []
-                    for c in tr["clips"]:
-                        if end(c) > start and c["startFrame"] < finish:
-                            m = e.media(c["mediaRef"])
-                            clips.append(dict(id=c["id"], mediaRef=c["mediaRef"], type=c["mediaType"],
-                                              frames=[c["startFrame"], end(c)], name=m["name"] if m else c.get("textContent", "Missing media"),
-                                              speed=c.get("speed", 1), opacity=c.get("opacity", 1),
-                                              volumeDb=20*math.log10(max(c.get("volume", 1), .001))))
-                    tracks.append(dict(trackId=tr["id"], index=index, type=tr["type"], name=tr.get("name"),
-                                       muted=tr.get("muted", False), hidden=tr.get("hidden", False), clips=clips))
-                return dict(id=t["id"], name=t["name"], fps=t["fps"], width=t["width"], height=t["height"],
-                            currentFrame=e.current_frame, canGenerate=False, tracks=tracks, markers=t.get("markers", []))
+            if name in ("get_timeline", "inspect_timeline"):
+                return self.timeline_payload(e, args)
+            if name == "manage_markers":
+                if not any(k in args for k in ("create", "update", "remove")):
+                    t = copy.deepcopy(e.timeline)
+                    return dict(markers=t.get("markers", []))
+                return e.manage_markers(args.get("create"), args.get("update"), args.get("remove"))
             if name == "get_media":
-                if "folder" in args:
-                    raise ValueError("Folder filtering is not yet implemented")
-                assets = []
-                for m in e.manifest["entries"]:
+                if "folder" in args and args["folder"]:
+                    assets = [m for m in e.manifest["entries"] if m.get("folder") == args["folder"]]
+                else:
+                    assets = list(e.manifest["entries"])
+                out = []
+                for m in assets:
                     if "ids" in args and m["id"] not in args["ids"]:
                         continue
                     if args.get("pending") and not m.get("generationStatus"):
                         continue
-                    item = {k: m[k] for k in ("id", "name", "type", "duration", "sourceWidth", "sourceHeight", "hasAudio") if k in m}
+                    item = {k: m[k] for k in ("id", "name", "type", "duration", "sourceWidth", "sourceHeight", "hasAudio", "folder") if k in m}
                     try:
                         item["missing"] = not e.media_path(m).is_file()
                     except ValueError:
                         item["missing"] = True
-                    assets.append(item)
-                return dict(assets=assets, timelines=[dict(id=t["id"], name=t["name"]) for t in e.doc["timelines"]])
+                    out.append(item)
+                return dict(assets=out, timelines=[dict(id=t["id"], name=t["name"]) for t in e.doc["timelines"]],
+                            folders=e.manifest.get("folders", []))
+            if name == "inspect_media":
+                out = []
+                for mid in args["ids"]:
+                    m = e.media(mid)
+                    if not m:
+                        raise ValueError("Unknown media id: " + mid)
+                    item = dict(m)
+                    try:
+                        item["missing"] = not e.media_path(m).is_file()
+                        item["absolutePath"] = str(e.media_path(m))
+                    except ValueError as err:
+                        item["missing"] = True
+                        item["error"] = str(err)
+                    out.append(item)
+                return dict(assets=out)
+            if name == "search_media":
+                q = args["query"].lower()
+                hits = [m for m in e.manifest["entries"] if q in m.get("name", "").lower()]
+                limit = args.get("limit", 20)
+                return dict(query=args["query"], count=len(hits),
+                            assets=[dict(id=m["id"], name=m["name"], type=m["type"], duration=m.get("duration")) for m in hits[:limit]])
+            if name == "organize_media":
+                def action():
+                    folders = e.manifest.setdefault("folders", [])
+                    for f in args.get("createFolders", []):
+                        if f not in folders:
+                            folders.append(f)
+                    for r in args.get("rename", []):
+                        if r["folder"] not in folders:
+                            raise ValueError("Unknown folder: " + r["folder"])
+                        folders.remove(r["folder"])
+                        folders.append(r["name"])
+                        for m in e.manifest["entries"]:
+                            if m.get("folder") == r["folder"]:
+                                m["folder"] = r["name"]
+                    for mv in args.get("move", []):
+                        for mid in mv["ids"]:
+                            m = e.media(mid)
+                            if not m:
+                                raise ValueError("Unknown media id: " + mid)
+                            m["folder"] = mv.get("folder")
+                    return dict(folders=list(folders))
+                return e.mutate("Organize media", action)
+            if name == "capture_frame":
+                from .media import capture_frame, frozen_editor
+                frame = args.get("frame", e.current_frame)
+                total = duration(e.timeline)
+                if not total:
+                    raise ValueError("The timeline is empty")
+                if not 0 <= frame < total:
+                    raise ValueError("frame must be inside the timeline")
+                dest = Path(args.get("outputPath") or f"/tmp/palmier-frame-{frame}.png").resolve()
+                if dest.suffix.lower() != ".png":
+                    raise ValueError("outputPath must end with .png")
+                snapshot = frozen_editor(e)
+                t = next(t for t in snapshot.doc["timelines"] if t["id"] == snapshot.doc["activeTimelineId"])
+                capture_frame(snapshot, t, frame, dest)
+                return dict(path=str(dest), frame=frame)
+            if name == "insert_clips":
+                return e.insert_clips(args["atFrame"], args["entries"])
+            if name == "ripple_delete_ranges":
+                return e.ripple_delete_ranges(args["ranges"])
+            if name == "swap_clip_media":
+                return e.swap_clip_media(args["swaps"])
+            if name == "copy_clip_settings":
+                return e.copy_clip_settings(args["sourceClipId"], args.get("targetClipIds"),
+                                            args.get("targetTrack"), args.get("startFrame"), args.get("endFrame"))
+            if name == "set_keyframes":
+                return e.set_keyframes(args["clipId"], args["tracks"])
+            if name == "apply_layout":
+                return e.apply_layout(args["layout"], args["slots"], args.get("fit", "cover"))
+            if name == "sync_clips":
+                return e.sync_clips(args["clipIds"], args.get("toFrame"))
+            if name == "manage_clip_links":
+                if not args:
+                    groups = {}
+                    for tr in e.timeline["tracks"]:
+                        for c in tr["clips"]:
+                            g = c.get("linkGroupId")
+                            if g:
+                                groups.setdefault(g, []).append(c["id"])
+                    return dict(groups=groups)
+                return e.manage_clip_links(args.get("link"), args.get("unlink"))
+            if name == "add_captions":
+                return e.add_captions(args["cues"], args.get("trackIndex"), args.get("style"))
+            if name == "apply_color":
+                return e.apply_color(args["clipIds"], args.get("color"), args.get("reset", False))
+            if name == "apply_effect":
+                return e.apply_effect(args["clipIds"], args["effects"])
+            if name == "inspect_color":
+                if "clipId" in args:
+                    _, c = e.clip(args["clipId"])
+                    return dict(clipId=args["clipId"], color=copy.deepcopy(c.get("color") or {}),
+                                effects=copy.deepcopy(c.get("effects") or []),
+                                hint="Tune with apply_color knobs: exposure/contrast/saturation/temperature/highlights/shadows.")
+                m = e.media(args.get("mediaRef", ""))
+                if not m:
+                    raise ValueError("Supply clipId or a known mediaRef")
+                return dict(mediaRef=m["id"], name=m["name"], type=m["type"],
+                            hint="Place the asset, then grade the clip with apply_color.")
+            if name == "denoise_audio":
+                return e.set_denoise(args["clipIds"], args.get("enabled", True), args.get("strength", 0.6))
+            if name == "remove_silence":
+                from .media import detect_silence
+                index = args.get("trackIndex", 0)
+                if index >= len(e.timeline["tracks"]):
+                    raise ValueError("Unknown trackIndex")
+                track = e.timeline["tracks"][index]
+                audio_clips = [c for c in track["clips"] if c["mediaType"] == "audio" or e.media(c["mediaRef"],)]
+                spans = []
+                for c in audio_clips:
+                    m = e.media(c["mediaRef"])
+                    if not m or m["type"] not in ("audio", "video"):
+                        continue
+                    try:
+                        path = e.media_path(m)
+                    except ValueError:
+                        continue
+                    if not path.is_file():
+                        continue
+                    for s0, s1 in detect_silence(path, args.get("thresholdDb", -35), args.get("minLength", 0.5)):
+                        f0 = c["startFrame"] + round((s0 - c.get("trimStartFrame", 0) / e.timeline["fps"]) * e.timeline["fps"])
+                        f1 = c["startFrame"] + round((s1 - c.get("trimStartFrame", 0) / e.timeline["fps"]) * e.timeline["fps"])
+                        f0 = max(c["startFrame"], f0)
+                        f1 = min(end(c), f1)
+                        if f1 - f0 >= round(e.timeline["fps"] * 0.2):
+                            spans.append(dict(trackIndex=index, startFrame=f0, endFrame=f1))
+                if not spans:
+                    return dict(removed=[], note="No silence spans found with current threshold")
+                return e.ripple_delete_ranges(spans)
+            if name == "get_transcript":
+                return dict(words=[], note="Local speech transcription is not bundled in this Linux port. Use captions via add_captions or attach an SRT as captions.")
+            if name == "detect_beats":
+                return dict(beats=[], note="Beat detection is not bundled. Cut on markers or use remove_silence for dead air.")
+            if name == "manage_multicam":
+                def action():
+                    if args["action"] == "create":
+                        group = uid()
+                        for cid in args.get("clipIds", []):
+                            _, c = e.clip(cid)
+                            c["multicamGroupId"] = group
+                        return dict(groupId=group, clipIds=args.get("clipIds", []))
+                    for tr in e.timeline["tracks"]:
+                        for c in tr["clips"]:
+                            if c.get("multicamGroupId") == args.get("groupId"):
+                                c.pop("multicamGroupId", None)
+                    return dict(disbanded=args.get("groupId"))
+                return e.mutate("Manage multicam", action)
+            if name == "change_cam":
+                def action():
+                    touched = 0
+                    for tr in e.timeline["tracks"]:
+                        for c in tr["clips"]:
+                            if c.get("multicamGroupId") == args["groupId"] and args["startFrame"] <= c["startFrame"] < args.get("endFrame", 10**9):
+                                c["multicamAngle"] = args["angle"]
+                                touched += 1
+                    return dict(switched=touched)
+                return e.mutate("Change cam", action)
+            if name == "get_multicam":
+                out = []
+                for tr in e.timeline["tracks"]:
+                    for c in tr["clips"]:
+                        if c.get("multicamGroupId") == args.get("groupId"):
+                            out.append(dict(clipId=c["id"], angle=c.get("multicamAngle", 0),
+                                            frames=[c["startFrame"], end(c)]))
+                return dict(groupId=args.get("groupId"), clips=out)
+            if name == "list_models":
+                from .media import hw_encoders
+                return dict(canGenerate=False, localFilters=["grayscale", "blur", "sharpen", "vignette", "mirror", "denoise-light"],
+                            colorKnobs=["exposure", "contrast", "saturation", "temperature", "highlights", "shadows"],
+                            hwEncoders=hw_encoders(),
+                            note="Generative video/image/audio needs a Palmier subscription backend, which is not included in this GPL port.")
+            if name in ("generate_video", "generate_image", "generate_audio", "upscale_media"):
+                return dict(canGenerate=False, status="refused",
+                            note="Generation/upscale needs a Palmier subscription backend, not included in this GPL Linux port. Timeline editing, color, effects and export work offline.")
+            if name == "send_feedback":
+                return dict(status="recorded", note="Feedback is kept locally in this port; email founders@palmier.io for upstream contact.")
             if name == "add_clips":
                 return e.add_clips(args["entries"])
             if name == "move_clips":
@@ -161,8 +410,8 @@ class Tools:
                             c.setdefault("textStyle", {}).update(args["style"])
                     return dict(clipIds=args["clipIds"])
                 return e.mutate("Update text", action)
-            if name in ("undo", "windows_redo"):
-                return e.undo(name == "windows_redo")
+            if name in ("undo", "windows_redo", "linux_redo"):
+                return e.undo(name in ("windows_redo", "linux_redo"))
             if name == "manage_tracks":
                 def select(selector):
                     if ("trackId" in selector) == ("index" in selector):
@@ -217,7 +466,7 @@ class Tools:
                     return dict(exports=self.exports.list())
                 self.exports.cancel(args.get("jobId"))
                 return dict(status="cancelling", jobId=args["jobId"])
-            if name == "windows_playback":
+            if name in ("windows_playback", "linux_playback"):
                 if args["action"] == "seek" and "frame" not in args:
                     raise ValueError("seek requires frame")
                 total = duration(e.timeline)
@@ -312,8 +561,8 @@ class MCPServer:
                 if method == "initialize":
                     result = dict(protocolVersion=params.get("protocolVersion", "2025-03-26"),
                                   capabilities=dict(tools=dict(listChanged=False)),
-                                  serverInfo=dict(name="palmier-pro-windows", version=VERSION),
-                                  instructions="Native Qt editor. Supported GPL tool subsets only. Reads and edits share desktop state. Save unsaved projects before switching.")
+                                  serverInfo=dict(name="palmier-pro-linux", version=VERSION),
+                                  instructions="Native Qt Linux editor. Supported GPL tool subsets only. Reads and edits share desktop state. Save unsaved projects before switching.")
                 elif method == "ping":
                     result = {}
                 elif method == "tools/list":

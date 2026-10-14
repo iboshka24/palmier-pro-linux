@@ -81,22 +81,66 @@ def duration(timeline):
 
 
 def assert_renderable(clip):
-    for key in ("effects", "opacityTrack", "volumeTrack", "rotationTrack", "positionTrack", "scaleTrack", "cropTrack", "multicamGroupId"):
+    for key in ("opacityTrack", "volumeTrack", "rotationTrack", "positionTrack", "scaleTrack", "cropTrack", "multicamGroupId"):
         if clip.get(key):
             raise ValueError(f"Rendering {key} is not implemented; clip {clip['id']} was not silently flattened")
     if clip.get("blendMode", "normal") not in (None, "normal"):
         raise ValueError("Non-normal blend modes are not implemented")
-    tr = clip.get("transform", {})
-    defaults = dict(centerX=.5, centerY=.5, width=1., height=1., rotation=0., rotationX=0., rotationY=0., flipHorizontal=False, flipVertical=False)
-    if any(tr.get(k, v) != v for k, v in defaults.items()):
-        raise ValueError("Non-default transforms are not implemented")
-    if any(clip.get("crop", {}).values()) or clip.get("edgeRounding", 0) or clip.get("edgeSoftness", 0):
-        raise ValueError("Crop and edge effects are not implemented")
+    if clip.get("edgeRounding", 0) or clip.get("edgeSoftness", 0):
+        raise ValueError("Edge rounding/softness is stored but not rendered; set it to 0 to export")
     if clip.get("mediaType") not in ("video", "audio", "image", "text"):
         raise ValueError("Unsupported clip type: " + clip.get("mediaType", "unknown"))
     for key in ("fadeInInterpolation", "fadeOutInterpolation"):
         if clip.get(key, "linear") != "linear":
             raise ValueError("Only linear fade interpolation is currently rendered")
+    tr = clip.get("transform", {})
+    if tr.get("rotationX", 0) or tr.get("rotationY", 0):
+        raise ValueError("3D tilt (rotationX/Y) is stored but not rendered")
+
+
+def color_filter(color):
+    if not color:
+        return ""
+    parts = []
+    exposure = color.get("exposure", 0)
+    contrast = color.get("contrast", 0)
+    saturation = color.get("saturation", 0)
+    if exposure or contrast or saturation:
+        brightness = max(-1, min(1, exposure / 4))
+        eq_contrast = max(0.1, 1 + contrast / 4)
+        eq_sat = max(0, 1 + saturation / 2)
+        parts.append(f"eq=brightness={brightness:.3f}:contrast={eq_contrast:.3f}:saturation={eq_sat:.3f}")
+    temp = color.get("temperature", 0)
+    if temp:
+        warm = max(-1, min(1, temp / 5))
+        parts.append(f"colorbalance=rs={warm * .2:.3f}:bs={-warm * .25:.3f}:rm={warm * .1:.3f}:bm={-warm * .12:.3f}")
+    if color.get("highlights"):
+        parts.append(f"eq=highlight={max(-1, min(1, color['highlights'] / 8)):.3f}")
+    if color.get("shadows"):
+        parts.append(f"eq=shadow={max(-1, min(1, color['shadows'] / 8)):.3f}")
+    return ("," + ",".join(parts)) if parts else ""
+
+
+def effect_filter(effects):
+    if not effects:
+        return ""
+    parts = []
+    for fx in effects:
+        ftype = fx.get("type")
+        params = fx.get("params", {}) or {}
+        if ftype == "grayscale":
+            parts.append("hue=s=0")
+        elif ftype == "blur":
+            parts.append(f"gblur=sigma={max(0.5, min(20, float(params.get('sigma', 2)))):.1f}")
+        elif ftype == "sharpen":
+            parts.append("unsharp=5:5:1.0:5:5:0.0")
+        elif ftype == "vignette":
+            parts.append("vignette=PI/4")
+        elif ftype == "mirror":
+            parts.append("hflip")
+        elif ftype == "denoise-light":
+            parts.append("hqdn3d=1.5:1.5:6:6")
+    return ("," + ",".join(parts)) if parts else ""
 
 
 def filter_graph(editor, timeline, work, resolution="Match Timeline"):
@@ -161,13 +205,38 @@ def filter_graph(editor, timeline, work, resolution="Match Timeline"):
             source = index
             index += 1
             if c["mediaType"] != "audio":
-                vf = f"setpts=(PTS-STARTPTS)/{speed},fps={fps},scale={width}:{height}:force_original_aspect_ratio=decrease,format=rgba,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1,colorchannelmixer=aa={opacity}"
+                tr = c.get("transform", {}) or {}
+                cr = c.get("crop", {}) or {}
+                cx = float(tr.get("centerX", .5))
+                cy = float(tr.get("centerY", .5))
+                tw = max(0.05, min(2.0, float(tr.get("width", 1.0))))
+                th = max(0.05, min(2.0, float(tr.get("height", 1.0))))
+                slot_w = max(2, round(width * tw / 2) * 2)
+                slot_h = max(2, round(height * th / 2) * 2)
+                ox = round(cx * width - slot_w / 2)
+                oy = round(cy * height - slot_h / 2)
+                chain = [f"setpts=(PTS-STARTPTS)/{speed}", f"fps={fps}"]
+                if any(cr.values()):
+                    l, t, r, b = (float(cr.get(k, 0)) for k in ("left", "top", "right", "bottom"))
+                    chain.append(f"crop=w='iw*{1 - l - r:.4f}':h='ih*{1 - t - b:.4f}':x='iw*{l:.4f}':y='ih*{t:.4f}'")
+                chain.append(f"scale={slot_w}:{slot_h}:force_original_aspect_ratio=increase")
+                chain.append(f"crop={slot_w}:{slot_h}")
+                chain.append("format=rgba")
+                if tr.get("flipHorizontal"):
+                    chain.append("hflip")
+                if tr.get("flipVertical"):
+                    chain.append("vflip")
+                rot = float(tr.get("rotation", 0) or 0)
+                if rot:
+                    chain.append(f"rotate={rot}*PI/180:ow=iw:oh=ih:c=black@0")
+                chain.append(f"setsar=1,colorchannelmixer=aa={opacity}")
+                vf = ",".join(chain) + color_filter(c.get("color") or {}) + effect_filter(c.get("effects") or [])
                 if fadein:
                     vf += f",fade=t=in:st=0:d={fadein}:alpha=1"
                 if fadeout:
                     vf += f",fade=t=out:st={length-fadeout}:d={fadeout}:alpha=1"
                 filters.append(f"[{source}:v]{vf},setpts=PTS+{start}/TB[layer{n}]")
-                filters.append(f"[{visual}][layer{n}]overlay=eof_action=pass:repeatlast=0:enable='gte(t,{start})*lt(t,{start+length})'[v{n}]")
+                filters.append(f"[{visual}][layer{n}]overlay=x={ox}:y={oy}:eof_action=pass:repeatlast=0:enable='gte(t,{start})*lt(t,{start+length})'[v{n}]")
                 visual = f"v{n}"
             if m.get("hasAudio") and not track.get("muted"):
                 remaining, tempo = speed, []
@@ -179,6 +248,9 @@ def filter_graph(editor, timeline, work, resolution="Match Timeline"):
                     remaining /= .5
                 tempo.append(f"atempo={remaining}")
                 af = f"asetpts=PTS-STARTPTS,{','.join(tempo)},atrim=duration={length},volume={c.get('volume',1)}"
+                if c.get("denoise"):
+                    strength = float((c["denoise"] or {}).get("strength", 0.6))
+                    af += f",afftdn=nf={-20 - strength * 10:.0f}"
                 if fadein:
                     af += f",afade=t=in:st=0:d={fadein}"
                 if fadeout:
@@ -343,3 +415,37 @@ class ExportQueue:
             threads = list(self.threads)
         for thread in threads:
             thread.join(30)
+
+
+def capture_frame(editor, timeline, frame, destination):
+    return render(editor, timeline, destination, frame=frame)
+
+
+def detect_silence(path, noise_db=-35, min_len=0.5):
+    out = run([executable("ffmpeg"), "-hide_banner", "-i", str(path),
+               "-af", f"silencedetect=noise={noise_db}dB:d={min_len}",
+               "-f", "null", "-"], timeout=120,
+              stderr=subprocess.STDOUT).stdout.decode("utf-8", errors="replace")
+    spans, start = [], None
+    for line in out.splitlines():
+        m0 = re.search(r"silence_start:\s*([\d.]+)", line)
+        m1 = re.search(r"silence_end:\s*([\d.]+)", line)
+        if m0:
+            start = float(m0.group(1))
+        elif m1 and start is not None:
+            spans.append([start, float(m1.group(1))])
+            start = None
+    return spans
+
+
+@lru_cache(maxsize=1)
+def hw_encoders():
+    try:
+        out = run([executable("ffmpeg"), "-hide_banner", "-encoders"], timeout=15).stdout.decode("utf-8", errors="replace")
+    except Exception:
+        return []
+    found = []
+    for name in ("h264_nvenc", "hevc_nvenc", "h264_vaapi", "hevc_vaapi", "h264_qsv", "hevc_qsv"):
+        if name in out:
+            found.append(name)
+    return found

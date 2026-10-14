@@ -20,20 +20,44 @@ from .platforms import desktop_name, ui_font
 from . import VERSION
 
 THEME = """
-QWidget {background:#18191C;color:#FAFAFA;font-family:'Segoe UI';font-size:12px;}
-QMenuBar,QMenu,QStatusBar {background:#1E1F23;}
-QMenu::item:selected {background:#303137;}
-QPushButton,QComboBox,QSpinBox,QDoubleSpinBox,QLineEdit {background:#26272C;border:1px solid #404148;border-radius:4px;padding:5px;}
-QPushButton:hover {background:#303137;} QPushButton:disabled {color:#777;}
-QListWidget,QTextEdit {background:#1E1F23;border:1px solid #303137;}
-QListWidget::item:selected {background:#303137;}
-QSplitter::handle {background:#090A0B;width:1px;height:1px;}
-QSlider::groove:horizontal {height:4px;background:#404148;}
-QSlider::handle:horizontal {width:10px;margin:-4px 0;background:#ECECEC;border-radius:5px;}
-QProgressBar {border:1px solid #404148;text-align:center;} QProgressBar::chunk {background:#2E7765;}
+QWidget {background:#0F1115;color:#E8EAF0;font-family:'Inter';font-size:13px;}
+QMainWindow {background:#0F1115;}
+QMenuBar {background:#14171D;color:#E8EAF0;padding:4px;}
+QMenuBar::item:selected {background:#232833;border-radius:6px;}
+QMenu {background:#171B22;border:1px solid #2A3040;border-radius:8px;padding:6px;}
+QMenu::item {padding:6px 18px;border-radius:6px;}
+QMenu::item:selected {background:#2B3B5C;}
+QStatusBar {background:#14171D;color:#9AA3B5;}
+QLabel {color:#E8EAF0;}
+QPushButton {background:#1E2430;border:1px solid #2E3648;border-radius:8px;padding:7px 12px;font-weight:600;}
+QPushButton:hover {background:#283050;border-color:#3D4A6B;}
+QPushButton:pressed {background:#1A2130;}
+QPushButton:disabled {color:#5B6373;}
+QPushButton#accent {background:#4C7DFF;border-color:#4C7DFF;color:white;}
+QPushButton#accent:hover {background:#5B8BFF;}
+QComboBox,QSpinBox,QDoubleSpinBox,QLineEdit {background:#141821;border:1px solid #2A3040;border-radius:8px;padding:7px;selection-background-color:#4C7DFF;}
+QComboBox:focus,QLineEdit:focus {border-color:#4C7DFF;}
+QListWidget,QTextEdit {background:#12151C;border:1px solid #232A3A;border-radius:10px;padding:4px;}
+QListWidget::item {border-radius:8px;padding:6px;}
+QListWidget::item:selected {background:#24304D;}
+QListWidget::item:hover {background:#1B2130;}
+QSplitter::handle {background:#1C212C;width:1px;height:1px;}
+QSplitter::handle:hover {background:#4C7DFF;}
+QSlider::groove:horizontal {height:5px;background:#232A3A;border-radius:3px;}
+QSlider::handle:horizontal {width:14px;margin:-5px 0;background:#E8EAF0;border-radius:7px;}
+QSlider::handle:horizontal:hover {background:#4C7DFF;}
+QProgressBar {border:1px solid #2A3040;border-radius:6px;background:#141821;text-align:center;color:#E8EAF0;}
+QProgressBar::chunk {background:#3FB97F;border-radius:5px;}
+QToolTip {background:#1E2430;color:#E8EAF0;border:1px solid #2E3648;padding:6px;}
+QScrollBar:vertical {background:transparent;width:10px;}
+QScrollBar::handle:vertical {background:#2A3040;border-radius:5px;min-height:30px;}
+QScrollBar::handle:vertical:hover {background:#3D4A6B;}
+QScrollBar:horizontal {background:transparent;height:10px;}
+QScrollBar::handle:horizontal {background:#2A3040;border-radius:5px;min-width:30px;}
 """
-THEME = THEME.replace("Segoe UI", ui_font())
-COLORS = dict(video="#1D5878", audio="#2E7765", image="#715486", text="#715486")
+THEME = THEME.replace("'Inter'", f"'{ui_font()}'")
+COLORS = dict(video="#2F6FED", audio="#2FA37C", image="#8A63D2", text="#E8912D")
+ACCENT = "#4C7DFF"
 
 
 class Bridge(QObject):
@@ -68,7 +92,7 @@ class Timeline(QAbstractScrollArea):
             self.frame = self.editor.current_frame
         extent = max(duration(self.t) + self.t["fps"]*5, self.t["fps"]*30)
         self.horizontalScrollBar().setRange(0, max(0, round(extent*self.scale) - self.viewport().width()+160))
-        self.verticalScrollBar().setRange(0, max(0, len(self.t["tracks"])*58+28-self.viewport().height()))
+        self.verticalScrollBar().setRange(0, max(0, len(self.t["tracks"])*58+44-self.viewport().height()))
         self.viewport().update()
 
     def position(self, frame):
@@ -78,72 +102,126 @@ class Timeline(QAbstractScrollArea):
         return max(0, round((x-160+self.horizontalScrollBar().value())/self.scale))
 
     def row_at(self, y):
-        return math.floor((y-28+self.verticalScrollBar().value())/58)
+        return math.floor((y-44+self.verticalScrollBar().value())/58)
 
     def paintEvent(self, event):
         if not hasattr(self, "t"):
             return
+        from PySide6.QtGui import QPainterPath
         p = QPainter(self.viewport())
-        p.fillRect(self.viewport().rect(), QColor("#18191C"))
+        p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(self.viewport().rect(), QColor("#0F1115"))
         p.setFont(QFont(ui_font(), 9))
         scroll_y = self.verticalScrollBar().value()
+        header_h, row_h, ruler_h, marker_h = 160, 58, 28, 16
+        top = ruler_h + marker_h
         for i, tr in enumerate(self.t["tracks"]):
-            y = 28+i*58-scroll_y
-            p.fillRect(QRectF(0,y,self.viewport().width(),58), QColor("#1E1F23" if i%2==0 else "#18191C"))
-            p.setPen(QColor("#404148"))
-            p.drawLine(0,round(y+57),self.viewport().width(),round(y+57))
+            y = top+i*row_h-scroll_y
+            p.fillRect(QRectF(0,y,self.viewport().width(),row_h), QColor("#14171D" if i%2==0 else "#0F1115"))
+            p.setPen(QColor("#232A3A"))
+            p.drawLine(0,round(y+row_h-1),self.viewport().width(),round(y+row_h-1))
             for c in tr["clips"]:
                 x, w = self.position(c["startFrame"]), c["durationFrames"]*self.scale
-                if x+w < 160 or x > self.viewport().width():
+                if x+w < header_h or x > self.viewport().width():
                     continue
                 p.save()
-                p.setClipRect(QRectF(160,28,self.viewport().width()-160,self.viewport().height()-28))
-                rect = QRectF(x,y+4,max(2,w),48)
-                p.setBrush(QColor(COLORS.get(c["mediaType"], "#715486")))
-                p.setPen(QPen(QColor("#ECECEC" if c["id"] == self.selected_id else "#0B0C0E"),2 if c["id"] == self.selected_id else 1))
-                p.drawRoundedRect(rect,4,4)
+                p.setClipRect(QRectF(header_h,top,self.viewport().width()-header_h,self.viewport().height()-top))
+                rect = QRectF(x,y+5,max(2,w-2),row_h-10)
+                selected = c["id"] == self.selected_id
+                base = QColor(COLORS.get(c["mediaType"], "#8A63D2"))
+                if selected:
+                    base = base.lighter(125)
+                p.setBrush(base)
+                p.setPen(QPen(QColor("#FFFFFF" if selected else "#00000000"),2 if selected else 1))
+                p.drawRoundedRect(rect,8,8)
+                # fade triangles
+                fps = self.t["fps"]
+                for key, left in (("fadeInFrames", True), ("fadeOutFrames", False)):
+                    frames = c.get(key, 0) or 0
+                    if frames > 0 and w > 14:
+                        fw = min(w/2, frames*fps/ max(fps,1) * self.scale if False else frames*self.scale)
+                        fw = min(float(w/2), frames*self.scale)
+                        tri = QPainterPath()
+                        if left:
+                            tri.moveTo(rect.left(), rect.bottom()); tri.lineTo(rect.left()+fw, rect.bottom()); tri.lineTo(rect.left(), rect.bottom()-10)
+                        else:
+                            tri.moveTo(rect.right(), rect.bottom()); tri.lineTo(rect.right()-fw, rect.bottom()); tri.lineTo(rect.right(), rect.bottom()-10)
+                        p.fillPath(tri, QColor(255,255,255,70))
                 image=getattr(self,"images",{}).get(c["mediaRef"])
                 if image and not image.isNull():
                     p.setClipRect(rect.adjusted(1,20,-1,-1),Qt.IntersectClip)
                     thumb=image.scaled(64,27,Qt.IgnoreAspectRatio,Qt.SmoothTransformation)
                     if c["mediaType"]=="audio":
+                        p.setOpacity(0.85)
                         p.drawPixmap(rect.adjusted(1,20,-1,-1).toRect(),image)
+                        p.setOpacity(1.0)
                     else:
-                        for pos in range(max(160,round(x)),min(self.viewport().width(),round(x+w)),64):
-                            p.drawPixmap(pos,round(y+24),thumb)
+                        for pos in range(max(header_h,round(x)),min(self.viewport().width(),round(x+w)),64):
+                            p.drawPixmap(pos,round(y+25),thumb)
                     p.restore()
                     p.save()
-                    p.setClipRect(QRectF(160,28,self.viewport().width()-160,self.viewport().height()-28))
+                    p.setClipRect(QRectF(header_h,top,self.viewport().width()-header_h,self.viewport().height()-top))
                 p.setClipRect(rect.adjusted(5,0,-5,0), Qt.IntersectClip)
-                p.setPen(QColor("#FAFAFA"))
+                p.setPen(QColor("#FFFFFF"))
                 label = c.get("textContent") if c["mediaType"] == "text" else self.media_names.get(c["mediaRef"], "Missing media")
-                p.drawText(rect.adjusted(7,3,-5,-3), Qt.AlignLeft|Qt.AlignTop, label)
-                p.drawText(rect.adjusted(7,21,-5,-3), Qt.AlignLeft|Qt.AlignTop, f"{c['durationFrames']/self.t['fps']:.2f}s")
+                badges = ""
+                if c.get("color"):
+                    badges += " ●"
+                if c.get("effects"):
+                    badges += f" fx{len(c['effects'])}"
+                if c.get("linkGroupId"):
+                    badges += " 🔗"
+                if c.get("denoise"):
+                    badges += " 🎧"
+                p.drawText(rect.adjusted(8,4,-6,-4), Qt.AlignLeft|Qt.AlignTop, (label or "")[:48] + badges)
+                p.setPen(QColor(255,255,255,180))
+                p.drawText(rect.adjusted(8,22,-6,-4), Qt.AlignLeft|Qt.AlignTop, f"{c['durationFrames']/self.t['fps']:.2f}s · {c.get('speed',1):g}x")
                 p.restore()
-            p.fillRect(QRectF(0,y,160,58),QColor("#1E1F23"))
-            p.setPen(QColor("#BBBBBF"))
-            p.drawText(QRectF(10,y,105,58),Qt.AlignVCenter, tr.get("name") or ("A" if tr["type"]=="audio" else "V")+str(i+1))
-            p.drawText(QRectF(119,y,35,58),Qt.AlignCenter,"M" if tr.get("muted") else "♪" if tr["type"]=="audio" else "◉")
-        p.fillRect(QRectF(0,0,self.viewport().width(),28),QColor("#26272C"))
+            p.fillRect(QRectF(0,y,header_h,row_h),QColor("#14171D"))
+            p.setPen(QColor("#9AA3B5"))
+            p.drawText(QRectF(12,y,100,row_h),Qt.AlignVCenter, tr.get("name") or (("A" if tr["type"]=="audio" else "V")+str(i+1)))
+            kind_badge = "M" if tr.get("muted") else ("♪" if tr["type"]=="audio" else "◉")
+            p.setPen(QColor("#E8B44F" if tr.get("muted") else "#9AA3B5"))
+            p.drawText(QRectF(118,y,36,row_h),Qt.AlignCenter, kind_badge)
+            if tr.get("syncLocked", True):
+                p.setPen(QColor("#3FB97F"))
+                p.drawText(QRectF(140,y,18,row_h),Qt.AlignCenter,"⚡")
+        # ruler + markers
+        p.fillRect(QRectF(0,0,self.viewport().width(),ruler_h+marker_h),QColor("#14171D"))
+        for m in self.t.get("markers", []):
+            x = self.position(m.get("startFrame", 0))
+            if x >= header_h:
+                p.setPen(QColor(m.get("color", "#E8B44F")))
+                p.drawLine(round(x), ruler_h, round(x), ruler_h+marker_h)
+                p.fillRect(QRectF(x, ruler_h, 8, 8), QColor(m.get("color", "#E8B44F")))
         step = max(1, math.ceil(70/self.scale/self.t["fps"])) * self.t["fps"]
         first = self.frame_at(160)//step*step
         p.setPen(QColor("#949499"))
         for f in range(first, self.frame_at(self.viewport().width())+step, step):
             x = self.position(f)
             if x >= 160:
-                p.drawLine(round(x),19,round(x),28)
-                p.drawText(QRectF(x+3,0,100,25),Qt.AlignVCenter, f"{f/self.t['fps']:.0f}s")
-        p.fillRect(QRectF(0,0,160,28),QColor("#26272C"))
-        p.drawText(QRectF(10,0,145,28),Qt.AlignVCenter,"Timeline")
-        p.setPen(QPen(QColor("#FF524D"),1))
+                p.setPen(QColor("#5B6373"))
+                p.drawLine(round(x),18,round(x),28)
+                secs = f/self.t['fps']
+                label = f"{int(secs//60):02}:{int(secs%60):02}" if secs >= 60 else f"{secs:.0f}s"
+                p.setPen(QColor("#9AA3B5"))
+                p.drawText(QRectF(x+4,0,100,26),Qt.AlignVCenter, label)
+        p.fillRect(QRectF(0,0,160,28),QColor("#14171D"))
+        p.setPen(QColor("#E8EAF0"))
+        p.drawText(QRectF(12,0,145,28),Qt.AlignVCenter,"Timeline")
+        p.fillRect(QRectF(0,28,self.viewport().width(),16),QColor("#10131A"))
+        p.setPen(QColor("#5B6373"))
+        p.drawText(QRectF(12,28,145,16),Qt.AlignVCenter,"Markers")
+        p.setPen(QPen(QColor("#FF5C5C"),2))
         x = self.position(self.frame)
         if x >= 160:
             p.drawLine(round(x),0,round(x),self.viewport().height())
+            p.fillRect(QRectF(x-5,0,10,10), QColor("#FF5C5C"))
         if self.ghost:
             start, length, row = self.ghost
-            p.setPen(QPen(QColor("#FFFFFF"),1,Qt.DashLine))
+            p.setPen(QPen(QColor("#4C7DFF"),2,Qt.DashLine))
             p.setBrush(Qt.NoBrush)
-            p.drawRect(QRectF(self.position(start),28+row*58-scroll_y+4,length*self.scale,48))
+            p.drawRoundedRect(QRectF(self.position(start),44+row*58-scroll_y+5,length*self.scale,48),8,8)
 
     def hit(self, pos):
         row = self.row_at(pos.y())
@@ -155,6 +233,9 @@ class Timeline(QAbstractScrollArea):
     def mousePressEvent(self, event):
         self.setFocus()
         if event.position().y()<28 and event.position().x()>=160:
+            self.seek.emit(self.frame_at(event.position().x()))
+            return
+        if 28 <= event.position().y() < 44 and event.position().x() >= 160:
             self.seek.emit(self.frame_at(event.position().x()))
             return
         row = self.row_at(event.position().y())
@@ -288,9 +369,11 @@ class Window(QMainWindow):
     def panel(self,title):
         widget=QWidget()
         layout=QVBoxLayout(widget)
-        layout.setContentsMargins(8,6,8,6)
-        header=QLabel(title)
-        header.setFixedHeight(30)
+        layout.setContentsMargins(10,8,10,8)
+        layout.setSpacing(8)
+        header=QLabel(title.upper())
+        header.setStyleSheet("color:#9AA3B5;font-weight:700;letter-spacing:1px;")
+        header.setFixedHeight(24)
         layout.addWidget(header)
         return widget,layout
 
@@ -299,7 +382,7 @@ class Window(QMainWindow):
         agent,al=self.panel("Agent")
         self.chat_log=QTextEdit()
         self.chat_log.setReadOnly(True)
-        self.chat_log.setPlainText("Connect OpenCode via MCP:\n\nAdd a remote MCP server named palmier-pro:\nhttp://127.0.0.1:19789/mcp\n\nRestart OpenCode; ask it to edit the active Palmier project. The editor must stay open.\n\nCodex:\ncodex mcp add palmier-pro --url http://127.0.0.1:19789/mcp\n\nOr set OPENAI_API_KEY for the BYOK assistant below. This build does not reproduce Palmier's subscription generation service.")
+        self.chat_log.setPlainText("Palmier Pro Linux · MCP ready:\n\nhttp://127.0.0.1:19789/mcp\n\nOpenCode: add a remote MCP server named palmier-pro with this URL, restart OpenCode, keep the editor open.\n\nCodex: codex mcp add palmier-pro --url http://127.0.0.1:19789/mcp\n\n53 tools: markers, ripple insert/delete, layouts, captions, color, effects, denoise, links, keyframes, capture_frame and more. Generation tools honestly report canGenerate:false (no subscription backend in this GPL port).")
         al.addWidget(self.chat_log)
         self.chat_input=QLineEdit()
         self.chat_input.setPlaceholderText("Ask your agent…")
@@ -327,16 +410,16 @@ class Window(QMainWindow):
         ml.addWidget(self.library)
         media.setMinimumWidth(240)
         top.addWidget(media)
-        preview,pl=self.panel("Timeline · Preview")
+        preview,pl=self.panel("Preview")
         self.preview_stack=QStackedWidget()
         self.still=QLabel("Import media, then drag it into the timeline")
         self.still.setAlignment(Qt.AlignCenter)
-        self.still.setStyleSheet("background:black;color:#777;")
-        self.still.setMinimumSize(300,240)
+        self.still.setStyleSheet("background:#000;color:#5B6373;border-radius:12px;font-size:14px;")
+        self.still.setMinimumSize(320,240)
         self.video=QLabel()
         self.video.setAlignment(Qt.AlignCenter)
-        self.video.setMinimumSize(300,240)
-        self.video.setStyleSheet("background:black;")
+        self.video.setMinimumSize(320,240)
+        self.video.setStyleSheet("background:#000;border-radius:12px;")
         self.sink=QVideoSink(self)
         self.player.setVideoSink(self.sink)
         self.sink.videoFrameChanged.connect(self.present_frame)
@@ -344,8 +427,9 @@ class Window(QMainWindow):
         self.preview_stack.addWidget(self.video)
         pl.addWidget(self.preview_stack,1)
         controls=QHBoxLayout()
+        controls.setSpacing(8)
         self.timecode=QLabel("00:00:00:00")
-        self.timecode.setStyleSheet("color:#F29933;font-family:Consolas;")
+        self.timecode.setStyleSheet("color:#E8B44F;font-family:monospace;font-size:15px;font-weight:700;background:#141821;padding:6px 12px;border-radius:8px;")
         controls.addWidget(self.timecode)
         for label,callback in [("◀",lambda:self.seek(max(0,self.editor.current_frame-1))), ("▶ / Ⅱ",self.toggle_play), ("▶|",lambda:self.seek(self.editor.current_frame+1))]:
             button=QPushButton(label)
@@ -355,19 +439,53 @@ class Window(QMainWindow):
         top.addWidget(preview)
         inspector,il=self.panel("Inspector")
         form=QFormLayout()
+        form.setSpacing(6)
         self.clip_label=QLabel("Select a clip")
+        self.clip_label.setStyleSheet("font-weight:700;font-size:14px;")
         il.addWidget(self.clip_label)
+        self.clip_meta=QLabel("")
+        self.clip_meta.setStyleSheet("color:#9AA3B5;")
+        il.addWidget(self.clip_meta)
         self.fields={}
-        for key,label in [("startFrame","Start frame"),("durationFrames","Duration frames"),("trimStartFrame","Source trim"),("volumeDb","Volume dB"),("speed","Speed"),("opacity","Opacity"),("fadeInFrames","Fade in frames"),("fadeOutFrames","Fade out frames")]:
-            field=QDoubleSpinBox() if key in ("volumeDb","speed","opacity") else QSpinBox()
-            low,high = (-60,15) if key=="volumeDb" else (.05,16) if key=="speed" else (0,1) if key=="opacity" else (1,100_000_000) if key=="durationFrames" else (0,100_000_000)
+        for key,label in [("startFrame","Start frame"),("durationFrames","Duration frames"),("trimStartFrame","Source trim"),("volumeDb","Volume dB"),("speed","Speed"),("opacity","Opacity"),("fadeInFrames","Fade in frames"),("fadeOutFrames","Fade out frames"),
+                          ("exposure","Exposure"),("contrast","Contrast"),("saturation","Saturation"),("temperature","Temperature")]:
+            field=QDoubleSpinBox() if key in ("volumeDb","speed","opacity","exposure","contrast","saturation","temperature") else QSpinBox()
+            field.setDecimals(3 if key in ("opacity","speed") else 2 if key in ("volumeDb","exposure","contrast","saturation","temperature") else 0)
+            if key=="volumeDb": low,high=-60,15
+            elif key=="speed": low,high=.05,16
+            elif key=="opacity": low,high=0,1
+            elif key in ("exposure","contrast","saturation","temperature"): low,high=-5,5
+            elif key=="durationFrames": low,high=1,100_000_000
+            else: low,high=0,100_000_000
             field.setRange(low,high)
             form.addRow(label,field)
             self.fields[key]=field
         il.addLayout(form)
         apply=QPushButton("Apply properties")
+        apply.setObjectName("accent")
         apply.clicked.connect(self.apply_properties)
         il.addWidget(apply)
+        row2=QHBoxLayout()
+        self.effect_box=QComboBox()
+        self.effect_box.addItems(["grayscale","blur","sharpen","vignette","mirror","denoise-light"])
+        row2.addWidget(self.effect_box)
+        fx_add=QPushButton("+ FX")
+        fx_add.clicked.connect(self.apply_effect_ui)
+        row2.addWidget(fx_add)
+        fx_clear=QPushButton("Clear FX")
+        fx_clear.clicked.connect(lambda:self.act(lambda:self.editor.apply_effect([self.selected_id],[])) if self.selected_id else None)
+        row2.addWidget(fx_clear)
+        il.addLayout(row2)
+        row3=QHBoxLayout()
+        self.denoise_check=QCheckBox("Denoise")
+        row3.addWidget(self.denoise_check)
+        dn_apply=QPushButton("Apply denoise")
+        dn_apply.clicked.connect(self.apply_denoise_ui)
+        row3.addWidget(dn_apply)
+        color_reset=QPushButton("Reset color")
+        color_reset.clicked.connect(lambda:self.act(lambda:self.editor.apply_color([self.selected_id],reset=True)) if self.selected_id else None)
+        row3.addWidget(color_reset)
+        il.addLayout(row3)
         self.text_content=QLineEdit()
         self.text_content.setPlaceholderText("Text clip content")
         il.addWidget(self.text_content)
@@ -375,7 +493,7 @@ class Window(QMainWindow):
         update.clicked.connect(lambda:self.act(lambda:self.tools.call("update_text",dict(clipIds=[self.selected_id],content=self.text_content.text()))))
         il.addWidget(update)
         il.addStretch()
-        inspector.setMinimumWidth(250)
+        inspector.setMinimumWidth(290)
         top.addWidget(inspector)
         top.setSizes([352,600,300])
         work.addWidget(top)
@@ -383,11 +501,17 @@ class Window(QMainWindow):
         bl=QVBoxLayout(bottom)
         bl.setContentsMargins(0,0,0,0)
         toolbar=QHBoxLayout()
-        for text,callback in [("↶",lambda:self.act(self.editor.undo)),("↷",lambda:self.act(lambda:self.editor.undo(True))),
-                              ("Split",self.split_selected),("Delete",self.delete_selected),("[",lambda:self.trim_playhead(True)),("]",lambda:self.trim_playhead(False)),
-                              ("T",self.add_text),("+ V",lambda:self.act(lambda:self.editor.add_track("video"))),("+ A",lambda:self.act(lambda:self.editor.add_track("audio"))),
-                              ("Export",self.export_dialog)]:
+        toolbar.setSpacing(6)
+        for text,callback,tip in [("↶",lambda:self.act(self.editor.undo),"Undo (Ctrl+Z)"),("↷",lambda:self.act(lambda:self.editor.undo(True)),"Redo (Ctrl+Shift+Z)"),
+                              ("Split",self.split_selected,"Split at playhead (Ctrl+K)"),("Delete",self.delete_selected,"Delete clip (Del)"),("[",lambda:self.trim_playhead(True),"Trim start to playhead"),("]",lambda:self.trim_playhead(False),"Trim end to playhead"),
+                              ("T",self.add_text,"Add text"),("✦ Marker",self.add_marker_ui,"Add marker at playhead"),("CC",self.add_caption_ui,"Add caption"),
+                              ("▦ Layout",self.apply_layout_ui,"Split-screen / PiP layout"),
+                              ("+ V",lambda:self.act(lambda:self.editor.add_track("video")),"Add video track"),("+ A",lambda:self.act(lambda:self.editor.add_track("audio")),"Add audio track"),
+                              ("Export",self.export_dialog,"Export (Ctrl+E)")]:
             b=QPushButton(text)
+            b.setToolTip(tip)
+            if text == "Export":
+                b.setObjectName("accent")
             b.clicked.connect(callback)
             toolbar.addWidget(b)
         toolbar.addStretch()
@@ -525,21 +649,55 @@ class Window(QMainWindow):
         self.selected_id=cid
         with self.editor.lock:
             _,c=self.editor.clip(cid)
-            self.clip_label.setText(c.get("textContent",c["mediaType"]).split("\n")[0][:40])
+            title = c.get("textContent", c["mediaType"]).split("\n")[0][:40] if isinstance(c.get("textContent", c["mediaType"]), str) else c["mediaType"]
+            self.clip_label.setText(title)
+            meta = f"{c['mediaType']} · {c['durationFrames']}f · trims {c.get('trimStartFrame',0)}/{c.get('trimEndFrame',0)}"
+            if c.get("linkGroupId"):
+                meta += " · linked"
+            if c.get("effects"):
+                meta += f" · {len(c['effects'])} fx"
+            self.clip_meta.setText(meta)
+            color = c.get("color") or {}
             for key,field in self.fields.items():
-                value=20*math.log10(max(c.get("volume",1),.001)) if key=="volumeDb" else c.get(key,0)
-                field.setValue(value)
+                if key == "volumeDb":
+                    value = 20*math.log10(max(c.get("volume",1),.001))
+                elif key in ("exposure","contrast","saturation","temperature"):
+                    value = float(color.get(key, 0))
+                else:
+                    value = c.get(key,0)
+                try:
+                    field.setValue(value)
+                except Exception:
+                    pass
             self.text_content.setText(c.get("textContent",""))
+            self.denoise_check.setChecked(bool(c.get("denoise")))
 
     def apply_properties(self):
         if not self.selected_id:
             return
         def edit():
             def action():
-                self.editor.properties([self.selected_id],{k:f.value() for k,f in self.fields.items() if k!="startFrame"})
+                basic = {k:f.value() for k,f in self.fields.items() if k not in ("startFrame","exposure","contrast","saturation","temperature")}
+                if basic:
+                    self.editor.properties([self.selected_id],basic)
+                grade = {k:self.fields[k].value() for k in ("exposure","contrast","saturation","temperature") if abs(self.fields[k].value()) > 1e-9}
+                if grade:
+                    self.editor.apply_color([self.selected_id],grade)
                 self.editor.move([dict(clipId=self.selected_id,toFrame=self.fields["startFrame"].value())])
             self.editor.mutate("Inspector edit",action)
         self.act(edit)
+
+    def apply_effect_ui(self):
+        if not self.selected_id:
+            return
+        ftype = self.effect_box.currentText()
+        self.act(lambda:self.editor.apply_effect([self.selected_id],[dict(type=ftype)]))
+
+    def apply_denoise_ui(self):
+        if not self.selected_id:
+            return
+        enabled = self.denoise_check.isChecked()
+        self.act(lambda:self.editor.set_denoise([self.selected_id],enabled,0.6))
 
     def set_zoom(self,value):
         self.timeline.scale=value/10
@@ -596,6 +754,31 @@ class Window(QMainWindow):
         text,ok=QInputDialog.getText(self,"Text overlay","Content")
         if ok and text:
             self.act(lambda:self.editor.add_texts([dict(startFrame=self.editor.current_frame,endFrame=self.editor.current_frame+self.editor.timeline["fps"]*5,content=text)]))
+
+    def add_marker_ui(self):
+        name, ok = QInputDialog.getText(self, "Marker", "Marker name", text="Review")
+        if ok and name:
+            self.act(lambda:self.editor.manage_markers(create=[dict(startFrame=self.editor.current_frame, durationFrames=0, name=name)]))
+
+    def add_caption_ui(self):
+        text, ok = QInputDialog.getText(self, "Caption", "Caption text")
+        if ok and text:
+            fps = self.editor.timeline["fps"]
+            self.act(lambda:self.editor.add_captions([dict(startFrame=self.editor.current_frame,
+                                                            endFrame=self.editor.current_frame + fps*3, text=text)]))
+
+    def apply_layout_ui(self):
+        names = sorted(self.editor.LAYOUTS)
+        name, ok = QInputDialog.getItem(self, "Layout", "Choose a multi-video layout", names, 1, False)
+        if not ok:
+            return
+        with self.editor.lock:
+            clips = [c["id"] for tr in self.editor.timeline["tracks"] for c in tr["clips"] if c["mediaType"] in ("video", "image")][:len(self.editor.LAYOUTS[name])]
+        if len(clips) < len(self.editor.LAYOUTS[name]):
+            QMessageBox.information(self, "Layout", f"Layout {name} needs {len(self.editor.LAYOUTS[name])} visual clips on the timeline.")
+            return
+        slots = {slot: dict(clipIds=[cid]) for slot, cid in zip(sorted(self.editor.LAYOUTS[name]), clips)}
+        self.act(lambda:self.editor.apply_layout(name, slots))
 
     def import_dialog(self):
         files,_=QFileDialog.getOpenFileNames(self,"Import media","","Media (*.mp4 *.mov *.mkv *.mp3 *.wav *.png *.jpg *.jpeg);;All files (*)")

@@ -74,12 +74,21 @@ class MediaTests(unittest.TestCase):
         self.assertTrue(any(raw))
 
     def test_unsupported_effect_does_not_replace_existing_export(self):
-        self.e.clip(self.cid)[1]["effects"]=[dict(type="notImplemented")]
+        self.e.clip(self.cid)[1]["blendMode"] = "screen"
         output=self.root/"keep.mp4"
         output.write_bytes(b"original")
         with self.assertRaises(ValueError):
             render(self.e,self.e.timeline,output)
         self.assertEqual(output.read_bytes(),b"original")
+
+    def test_linux_color_transform_effect_render(self):
+        self.e.apply_color([self.cid], dict(saturation=1.0, contrast=0.5))
+        self.e.apply_effect([self.cid], [dict(type="grayscale")])
+        self.e.properties([self.cid], dict(transform=dict(centerX=0.5, centerY=0.5, width=0.5, height=0.5)))
+        output = self.root/"graded.mp4"
+        result = render(self.e, self.e.timeline, output)
+        self.assertTrue(output.stat().st_size > 1000)
+        self.assertIn("path", result)
 
     def test_missing_media_reports_error(self):
         self.red.unlink()

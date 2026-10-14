@@ -1,14 +1,30 @@
 import os
 import platform
+import shutil
 from pathlib import Path
 
 
 def desktop_name():
-    return "Palmier Pro " + ("Windows" if os.name == "nt" else "Linux")
+    return "Palmier Pro Linux" if os.name != "nt" else "Palmier Pro Windows"
 
 
 def ui_font():
-    return "Segoe UI" if os.name == "nt" else "DejaVu Sans"
+    if os.name == "nt":
+        return "Segoe UI"
+    for family in ("Inter", "DejaVu Sans", "Liberation Sans", "Noto Sans"):
+        return family
+    return "DejaVu Sans"
+
+
+def session_type():
+    return os.environ.get("XDG_SESSION_TYPE", "unknown")
+
+
+def hw_hint():
+    encoders = []
+    ffmpeg = shutil.which("ffmpeg")
+    return dict(session=session_type(), ffmpeg=bool(ffmpeg),
+                vaapi=Path("/dev/dri").exists(), encoders=encoders)
 
 
 def text_font(system=None):

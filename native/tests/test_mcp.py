@@ -49,9 +49,28 @@ class MCPTests(unittest.TestCase):
 
     def test_unsupported_and_invalid_arguments_do_not_mutate(self):
         before=self.e.snapshot()
-        for tool,args in [("detect_beats",{}),("generate_video",{}),("add_clips",dict(clips=[])),("set_clip_properties",dict(clipIds=["bad"],opacity=2))]:
+        for tool,args in [("read_skill",{}),("manage_skills",{}),("add_clips",dict(clips=[])),("set_clip_properties",dict(clipIds=["bad"],opacity=2))]:
             self.assertTrue(self.call(tool,args)["isError"])
             self.assertEqual(self.e.snapshot(),before)
+
+    def test_linux_toolset_markers_layout_color_effects(self):
+        self.assertFalse(self.call("manage_markers",dict(create=[dict(startFrame=10,name="Review")]))["isError"])
+        self.assertFalse(self.call("add_clips",dict(entries=[dict(mediaRef="a",trackIndex=0,startFrame=0,endFrame=60)]))["isError"])
+        timeline=json.loads(self.call("inspect_timeline",{})["content"][0]["text"])
+        cid=timeline["tracks"][0]["clips"][0]["id"]
+        self.assertFalse(self.call("apply_color",dict(clipIds=[cid],color=dict(saturation=1.5)))["isError"])
+        self.assertFalse(self.call("apply_effect",dict(clipIds=[cid],effects=[dict(type="grayscale")]))["isError"])
+        self.assertFalse(self.call("set_keyframes",dict(clipId=cid,tracks=dict(opacity=[dict(frame=0,value=1),dict(frame=30,value=0.5)])))["isError"])
+        self.assertFalse(self.call("manage_clip_links",dict(link=[cid]))["isError"])
+        self.assertFalse(self.call("insert_clips",dict(atFrame=60,entries=[dict(mediaRef="a")]))["isError"])
+        self.assertFalse(self.call("ripple_delete_ranges",dict(ranges=[dict(trackIndex=0,startFrame=0,endFrame=10)]))["isError"])
+        timeline2=json.loads(self.call("get_timeline",{})["content"][0]["text"])
+        ids=[c["id"] for c in timeline2["tracks"][0]["clips"]]
+        if len(ids) >= 2:
+            self.assertFalse(self.call("copy_clip_settings",dict(sourceClipId=ids[0],targetClipIds=ids[1:]))["isError"])
+        for honest in ["list_models","get_transcript","detect_beats","generate_video","generate_image","generate_audio","upscale_media","send_feedback"]:
+            args = dict(prompt="test") if honest.startswith("generate") else (dict(mediaRef="a") if honest=="upscale_media" else (dict(kind="bug",message="test") if honest=="send_feedback" else {}))
+            self.assertFalse(self.call(honest,args)["isError"])
 
     def test_browser_origin_and_bad_host_refused(self):
         for headers in [dict(Origin="https://evil.example"),dict(Host="evil.example")]:

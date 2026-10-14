@@ -45,6 +45,8 @@ def clip_defaults(kind, ref, start, duration, trim=0):
                 trimEndFrame=0, speed=1.0, volume=1.0, opacity=1.0,
                 fadeInFrames=0, fadeOutFrames=0, fadeInInterpolation="linear",
                 fadeOutInterpolation="linear", edgeRounding=0.0, edgeSoftness=0.0,
+                linkGroupId=None, color={}, effects=[],
+                keyframes={}, denoise=None,
                 transform=dict(centerX=.5, centerY=.5, width=1.0, height=1.0,
                                rotation=0.0, rotationX=0.0, rotationY=0.0,
                                flipHorizontal=False, flipVertical=False),
@@ -63,6 +65,11 @@ def validate_project(doc, manifest):
             integer(t[key], key, 2)
             if t[key] > 7680 or t[key] % 2:
                 raise ValueError("Canvas must have even dimensions up to 7680")
+        for m in t.get("markers", []):
+            integer(m.get("startFrame", 0), "marker startFrame")
+            integer(m.get("durationFrames", 0), "marker durationFrames")
+            if not isinstance(m.get("name", ""), str) or len(m.get("name", "")) > 120:
+                raise ValueError("Marker name must be a string up to 120 characters")
         for entity in [t, *t.get("tracks", []), *[c for tr in t.get("tracks", []) for c in tr["clips"]]]:
             if entity["id"] in ids:
                 raise ValueError("Duplicate entity ID")
@@ -76,6 +83,24 @@ def validate_project(doc, manifest):
                 number(c.get("speed", 1), "speed", .05, 16)
                 number(c.get("volume", 1), "volume", 0, 6)
                 number(c.get("opacity", 1), "opacity", 0, 1)
+                number(c.get("edgeRounding", 0), "edgeRounding", 0, 1)
+                number(c.get("edgeSoftness", 0), "edgeSoftness", 0, 1)
+                trf = c.get("transform", {})
+                if trf:
+                    for k in ("centerX", "centerY", "width", "height", "rotation", "rotationX", "rotationY"):
+                        number(trf.get(k, 0), "transform." + k, -3600, 3600)
+                cr = c.get("crop", {})
+                if cr:
+                    for k in ("left", "top", "right", "bottom"):
+                        number(cr.get(k, 0), "crop." + k, 0, 1)
+                    if sum(cr.get(k, 0) for k in ("left", "right")) >= 1 or sum(cr.get(k, 0) for k in ("top", "bottom")) >= 1:
+                        raise ValueError("Crop insets must leave visible source")
+                for fx in c.get("effects", []) or []:
+                    if not isinstance(fx.get("type"), str):
+                        raise ValueError("Effect type must be a string")
+                for knob in ("exposure", "contrast", "saturation", "temperature", "highlights", "shadows"):
+                    if knob in (c.get("color") or {}):
+                        number(c["color"][knob], "color." + knob, -10, 10)
     if doc.get("activeTimelineId") not in {t["id"] for t in doc["timelines"]}:
         raise ValueError("activeTimelineId does not identify a timeline")
     if not isinstance(manifest.get("entries"), list):
@@ -380,8 +405,8 @@ class Editor:
                 frame = integer(s["atFrame"], "atFrame")
                 if not c["startFrame"] < frame < end(c):
                     raise ValueError("Split point must be strictly inside the clip")
-                if any(c.get(k) for k in ("positionTrack", "opacityTrack", "volumeTrack", "scaleTrack", "effects")):
-                    raise ValueError("Splitting animated/effected original clips is not implemented")
+                if any(c.get(k) for k in ("positionTrack", "opacityTrack", "volumeTrack", "scaleTrack", "cropTrack", "multicamGroupId")):
+                    raise ValueError("Splitting animated/multicam original clips is not implemented")
                 right = copy.deepcopy(c)
                 right["id"] = uid()
                 offset = frame - c["startFrame"]
@@ -403,7 +428,8 @@ class Editor:
         return self.mutate("Remove clips", action)
 
     def properties(self, ids, values):
-        allowed = {"durationFrames", "trimStartFrame", "trimEndFrame", "speed", "volumeDb", "opacity", "fadeInFrames", "fadeOutFrames"}
+        allowed = {"durationFrames", "trimStartFrame", "trimEndFrame", "speed", "volumeDb", "opacity",
+                   "fadeInFrames", "fadeOutFrames", "edgeRounding", "edgeSoftness", "transform", "crop", "blendMode"}
         if not ids or not values or set(values) - allowed:
             raise ValueError("Unsupported or missing clip properties")
         def action():
@@ -418,6 +444,31 @@ class Editor:
                         number(v, k, .05, 16)
                         if "durationFrames" not in values:
                             c["durationFrames"] = max(1, round(c["durationFrames"] * c.get("speed", 1) / v))
+                        c[k] = v
+                    elif k == "transform":
+                        if not isinstance(v, dict):
+                            raise ValueError("transform must be an object")
+                        for tk, tv in v.items():
+                            if tk in ("flipHorizontal", "flipVertical"):
+                                if not isinstance(tv, bool):
+                                    raise ValueError("transform flip must be boolean")
+                                c["transform"][tk] = tv
+                            elif tk in ("centerX", "centerY", "width", "height", "rotation", "rotationX", "rotationY"):
+                                c["transform"][tk] = number(tv, "transform." + tk, -3600, 3600)
+                            else:
+                                raise ValueError("Unknown transform field: " + tk)
+                    elif k == "crop":
+                        if not isinstance(v, dict):
+                            raise ValueError("crop must be an object")
+                        for ck, cv in v.items():
+                            if ck not in ("left", "top", "right", "bottom"):
+                                raise ValueError("Unknown crop field: " + ck)
+                            c["crop"][ck] = number(cv, "crop." + ck, 0, 1)
+                    elif k in ("edgeRounding", "edgeSoftness"):
+                        c[k] = number(v, k, 0, 1)
+                    elif k == "blendMode":
+                        if v not in ("normal",):
+                            raise ValueError("Only normal blend mode is rendered")
                         c[k] = v
                     else:
                         c[k] = integer(v, k, 1 if k == "durationFrames" else 0)
@@ -461,3 +512,378 @@ class Editor:
                 ids.append(c["id"])
             return dict(clipIds=ids)
         return self.mutate("Add text", action)
+
+    # ---- Linux fork extensions (ported from palmier-io concepts) ----
+
+    def manage_markers(self, create=None, update=None, remove=None):
+        def action():
+            t = self.timeline
+            t.setdefault("markers", [])
+            created, updated = [], []
+            for m in create or []:
+                start = integer(m.get("startFrame", 0), "marker startFrame")
+                dur = integer(m.get("durationFrames", 0), "marker durationFrames")
+                name = m.get("name", "Marker")
+                if not isinstance(name, str) or not name or len(name) > 120:
+                    raise ValueError("Marker name must be 1..120 characters")
+                color = m.get("color", "#E8B44F")
+                import re
+                if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+                    raise ValueError("Marker color must be #RRGGBB")
+                entry = dict(markerId=uid(), name=name, comment=m.get("comment", ""),
+                             color=color, startFrame=start, endFrame=start + dur, durationFrames=dur)
+                t["markers"].append(entry)
+                created.append(entry["markerId"])
+            for m in update or []:
+                entry = next((x for x in t["markers"] if x["markerId"] == m["markerId"]), None)
+                if entry is None:
+                    raise ValueError("Unknown markerId: " + m["markerId"])
+                if "name" in m:
+                    if not isinstance(m["name"], str) or len(m["name"]) > 120:
+                        raise ValueError("Marker name must be up to 120 characters")
+                    entry["name"] = m["name"]
+                if "comment" in m:
+                    entry["comment"] = m["comment"]
+                if "startFrame" in m:
+                    entry["startFrame"] = integer(m["startFrame"], "marker startFrame")
+                    entry["endFrame"] = entry["startFrame"] + entry["durationFrames"]
+                if "durationFrames" in m:
+                    entry["durationFrames"] = integer(m["durationFrames"], "marker durationFrames")
+                    entry["endFrame"] = entry["startFrame"] + entry["durationFrames"]
+                updated.append(entry["markerId"])
+            for mid in remove or []:
+                entry = next((x for x in t["markers"] if x["markerId"] == mid), None)
+                if entry is None:
+                    raise ValueError("Unknown markerId: " + mid)
+                t["markers"].remove(entry)
+            return dict(created=created, updated=updated, removed=remove or [],
+                        markers=copy.deepcopy(t["markers"]))
+        return self.mutate("Manage markers", action)
+
+    def insert_clips(self, at_frame, entries):
+        at_frame = integer(at_frame, "atFrame")
+        if not entries:
+            raise ValueError("entries must not be empty")
+        def action():
+            if not self.timeline["tracks"]:
+                self.timeline["tracks"].append(new_track("video"))
+            total_push = 0
+            staged = []
+            for e in entries:
+                media = self.media(e["mediaRef"])
+                if not media:
+                    raise ValueError("Unknown mediaRef")
+                kind = media["type"]
+                dur = e.get("endFrame", e.get("startFrame", 0) + round(media["duration"] * self.timeline["fps"])) - e.get("startFrame", 0)
+                integer(dur, "durationFrames", 1)
+                total_push += dur
+                staged.append((e, media, kind, dur))
+            pushed_tracks = set()
+            for track in self.timeline["tracks"]:
+                if not track.get("syncLocked", True):
+                    continue
+                for c in track["clips"]:
+                    if c["startFrame"] >= at_frame:
+                        c["startFrame"] += total_push
+                pushed_tracks.add(track["id"])
+            result = []
+            cursor = at_frame
+            for e, media, kind, dur in staged:
+                index = e.get("trackIndex", 0)
+                integer(index, "trackIndex")
+                if index >= len(self.timeline["tracks"]):
+                    raise ValueError("Unknown trackIndex")
+                track = self.timeline["tracks"][index]
+                if (track["type"] == "audio") != (kind == "audio"):
+                    raise ValueError("Media is incompatible with destination track")
+                c = clip_defaults(kind, media["id"], cursor, dur)
+                track["clips"].append(c)
+                result.append(c["id"])
+                cursor += dur
+            return dict(clipIds=result, pushedFrames=total_push)
+        return self.mutate("Insert clips (ripple)", action)
+
+    def ripple_delete_ranges(self, ranges):
+        if not ranges:
+            raise ValueError("ranges must not be empty")
+        def action():
+            removed, closed = [], 0
+            for r in ranges:
+                index = integer(r.get("trackIndex", 0), "trackIndex")
+                start = integer(r.get("startFrame", 0), "startFrame")
+                finish = integer(r.get("endFrame", start + 1), "endFrame")
+                if finish <= start:
+                    raise ValueError("endFrame must be after startFrame")
+                if index >= len(self.timeline["tracks"]):
+                    raise ValueError("Unknown trackIndex")
+                track = self.timeline["tracks"][index]
+                gap = finish - start
+                keep = []
+                for c in track["clips"]:
+                    c_end = end(c)
+                    if c_end <= start or c["startFrame"] >= finish:
+                        keep.append(c)
+                    elif c["startFrame"] < start and c_end > finish:
+                        right = copy.deepcopy(c)
+                        right["id"] = uid()
+                        right["startFrame"] = start
+                        right["durationFrames"] = c_end - finish
+                        right["trimStartFrame"] += round((finish - c["startFrame"]) * c.get("speed", 1))
+                        c["durationFrames"] = start - c["startFrame"]
+                        keep.extend([c, right])
+                        removed.append(right["id"] + "-split")
+                    elif c["startFrame"] < start:
+                        c["durationFrames"] = start - c["startFrame"]
+                        keep.append(c)
+                    elif c_end > finish:
+                        shift = finish - c["startFrame"]
+                        c["trimStartFrame"] += round(shift * c.get("speed", 1))
+                        c["startFrame"] = start
+                        c["durationFrames"] = c_end - finish
+                        keep.append(c)
+                    else:
+                        removed.append(c["id"])
+                track["clips"] = keep
+                for tr in self.timeline["tracks"]:
+                    if tr["id"] == track["id"] or tr.get("syncLocked", True):
+                        for c in tr["clips"]:
+                            if c["startFrame"] >= finish:
+                                c["startFrame"] -= gap
+                closed += gap
+            return dict(removed=removed, closedFrames=closed)
+        return self.mutate("Ripple delete", action)
+
+    def swap_clip_media(self, swaps):
+        if not swaps:
+            raise ValueError("swaps must not be empty")
+        def action():
+            for s in swaps:
+                _, c = self.clip(s["clipId"])
+                media = self.media(s["mediaRef"])
+                if not media:
+                    raise ValueError("Unknown mediaRef")
+                if media["type"] != c["mediaType"] and not (media["type"] in ("video", "image") and c["mediaType"] in ("video", "image")):
+                    raise ValueError("Replacement media type is incompatible")
+                c["mediaRef"] = media["id"]
+            return dict(swapped=[s["clipId"] for s in swaps])
+        return self.mutate("Swap clip media", action)
+
+    def copy_clip_settings(self, source_id, target_ids=None, target_track=None, start_frame=None, end_frame=None):
+        _, src = self.clip(source_id)
+        portable = {k: copy.deepcopy(src.get(k)) for k in ("transform", "crop", "opacity", "color", "effects", "textStyle", "volume", "edgeRounding", "edgeSoftness") if src.get(k) is not None}
+        def action():
+            if target_ids is not None:
+                targets = [self.clip(cid)[1] for cid in target_ids]
+            elif target_track is not None:
+                track = next((t for t in self.timeline["tracks"] if t["id"] == target_track), None)
+                if track is None:
+                    raise ValueError("Unknown target track")
+                targets = [c for c in track["clips"] if c["mediaType"] == src["mediaType"] and c["id"] != source_id
+                           and (start_frame is None or end(c) > start_frame) and (end_frame is None or c["startFrame"] < end_frame)]
+                if not targets:
+                    raise ValueError("No compatible clips match the target selector")
+            else:
+                raise ValueError("Specify targetClipIds or targetTrack")
+            changed = 0
+            for c in targets:
+                if c["mediaType"] != src["mediaType"]:
+                    continue
+                for k, v in portable.items():
+                    c[k] = copy.deepcopy(v)
+                changed += 1
+            return dict(changed=changed, clipIds=[c["id"] for c in targets[:changed]])
+        return self.mutate("Copy clip settings", action)
+
+    def manage_clip_links(self, link=None, unlink=None):
+        def action():
+            if link:
+                group = uid()
+                for cid in link:
+                    _, c = self.clip(cid)
+                    c["linkGroupId"] = group
+                return dict(linkGroupId=group, clipIds=link)
+            result = []
+            for cid in unlink or []:
+                _, c = self.clip(cid)
+                c["linkGroupId"] = None
+                result.append(cid)
+            return dict(unlinked=result)
+        return self.mutate("Manage clip links", action)
+
+    def sync_clips(self, clip_ids, to_frame=None):
+        if not clip_ids:
+            raise ValueError("clipIds must not be empty")
+        def action():
+            if to_frame is None:
+                _, first = self.clip(clip_ids[0])
+                to_frame_local = first["startFrame"]
+            else:
+                to_frame_local = integer(to_frame, "toFrame")
+            for cid in clip_ids:
+                tr, c = self.clip(cid)
+                delta = to_frame_local - c["startFrame"]
+                c["startFrame"] = to_frame_local
+                _ = tr, delta
+            return dict(clipIds=clip_ids, toFrame=to_frame_local)
+        return self.mutate("Sync clips", action)
+
+    LAYOUTS = {
+        "full": {"main": (0.5, 0.5, 1.0, 1.0)},
+        "side_by_side": {"left": (0.25, 0.5, 0.5, 1.0), "right": (0.75, 0.5, 0.5, 1.0)},
+        "top_bottom": {"top": (0.5, 0.25, 1.0, 0.5), "bottom": (0.5, 0.75, 1.0, 0.5)},
+        "pip_bottom_right": {"main": (0.5, 0.5, 1.0, 1.0), "inset": (0.78, 0.72, 0.32, 0.32)},
+        "pip_bottom_left": {"main": (0.5, 0.5, 1.0, 1.0), "inset": (0.22, 0.72, 0.32, 0.32)},
+        "pip_top_right": {"main": (0.5, 0.5, 1.0, 1.0), "inset": (0.78, 0.28, 0.32, 0.32)},
+        "pip_top_left": {"main": (0.5, 0.5, 1.0, 1.0), "inset": (0.22, 0.28, 0.32, 0.32)},
+        "grid_2x2": {"r1c1": (0.25, 0.25, 0.5, 0.5), "r1c2": (0.75, 0.25, 0.5, 0.5),
+                     "r2c1": (0.25, 0.75, 0.5, 0.5), "r2c2": (0.75, 0.75, 0.5, 0.5)},
+        "main_sidebar": {"main": (0.35, 0.5, 0.7, 1.0), "sidebar": (0.85, 0.5, 0.3, 1.0)},
+        "three_up": {"left": (1/6, 0.5, 1/3, 1.0), "center": (0.5, 0.5, 1/3, 1.0), "right": (5/6, 0.5, 1/3, 1.0)},
+        "three_stack": {"top": (0.5, 1/6, 1.0, 1/3), "middle": (0.5, 0.5, 1.0, 1/3), "bottom": (0.5, 5/6, 1.0, 1/3)},
+    }
+
+    def apply_layout(self, layout, slots, fit="cover"):
+        if layout not in self.LAYOUTS:
+            raise ValueError("Unknown layout: " + layout)
+        spec = self.LAYOUTS[layout]
+        if set(slots) != set(spec):
+            raise ValueError(f"Layout {layout} needs slots {sorted(spec)}")
+        if fit not in ("cover", "fit"):
+            raise ValueError("fit must be cover or fit")
+        def action():
+            touched = []
+            for name, entry in slots.items():
+                cx, cy, w, h = spec[name]
+                for cid in entry.get("clipIds", []):
+                    _, c = self.clip(cid)
+                    if c["mediaType"] == "audio":
+                        raise ValueError("Layouts apply to visual clips only")
+                    c["transform"].update(dict(centerX=cx, centerY=cy, width=w, height=h))
+                    if fit == "cover":
+                        c["crop"] = dict(left=0.0, top=0.0, right=0.0, bottom=0.0)
+                    touched.append(cid)
+            return dict(layout=layout, clipIds=touched)
+        return self.mutate("Apply layout", action)
+
+    def add_captions(self, cues, track_index=None, style=None):
+        if not cues:
+            raise ValueError("cues must not be empty")
+        def action():
+            if track_index is None:
+                self.timeline["tracks"].insert(0, new_track("video", "Captions"))
+                index = 0
+            else:
+                index = integer(track_index, "trackIndex")
+                if index >= len(self.timeline["tracks"]):
+                    raise ValueError("Unknown trackIndex")
+            group = uid()
+            ids = []
+            for cue in cues:
+                start = integer(cue["startFrame"], "startFrame")
+                finish = integer(cue["endFrame"], "endFrame")
+                if finish <= start:
+                    raise ValueError("Caption endFrame must be after startFrame")
+                text = cue.get("text", "")
+                if not isinstance(text, str) or not text or len(text) > 1000:
+                    raise ValueError("Caption text must be 1..1000 characters")
+                c = clip_defaults("text", uid(), start, finish - start)
+                c["textContent"] = text
+                c["textStyle"] = dict(fontSize=(style or {}).get("fontSize", 64),
+                                      color=(style or {}).get("color", "#FFFFFF"))
+                c["captionGroupId"] = group
+                self.overwrite(self.timeline["tracks"][index], start, finish)
+                self.timeline["tracks"][index]["clips"].append(c)
+                ids.append(c["id"])
+            return dict(clipIds=ids, captionGroupId=group)
+        return self.mutate("Add captions", action)
+
+    def apply_color(self, clip_ids, grade=None, reset=False):
+        if not clip_ids:
+            raise ValueError("clipIds must not be empty")
+        if grade is None and not reset:
+            raise ValueError("Supply a grade object or reset:true")
+        def action():
+            for cid in clip_ids:
+                _, c = self.clip(cid)
+                if c["mediaType"] == "audio":
+                    raise ValueError("Color grades apply to visual clips only")
+                if reset:
+                    c["color"] = {}
+                else:
+                    if not isinstance(grade, dict):
+                        raise ValueError("grade must be an object")
+                    for k, v in grade.items():
+                        if k not in ("exposure", "contrast", "saturation", "temperature", "highlights", "shadows", "sharpen"):
+                            raise ValueError("Unknown color knob: " + k)
+                        number(v, "color." + k, -10, 10)
+                    current = dict(c.get("color") or {})
+                    current.update(grade)
+                    c["color"] = current
+            _, first = self.clip(clip_ids[0])
+            return dict(clipIds=clip_ids, color=copy.deepcopy(first.get("color") or {}))
+        return self.mutate("Apply color", action)
+
+    def apply_effect(self, clip_ids, effects):
+        if not clip_ids or not effects:
+            raise ValueError("clipIds and effects must not be empty")
+        supported = {"grayscale", "blur", "sharpen", "vignette", "mirror", "denoise-light"}
+        def action():
+            for cid in clip_ids:
+                _, c = self.clip(cid)
+                stack = list(c.get("effects") or [])
+                for fx in effects:
+                    ftype = fx.get("type")
+                    if ftype not in supported:
+                        raise ValueError("Unsupported effect: " + str(ftype))
+                    params = {k: v for k, v in fx.items() if k != "type"}
+                    stack = [e for e in stack if e.get("type") != ftype]
+                    stack.append(dict(type=ftype, params=params))
+                c["effects"] = stack
+            return dict(clipIds=clip_ids)
+        return self.mutate("Apply effect", action)
+
+    def set_denoise(self, clip_ids, enabled=True, strength=0.6):
+        if not clip_ids:
+            raise ValueError("clipIds must not be empty")
+        number(strength, "strength", 0, 1)
+        def action():
+            for cid in clip_ids:
+                _, c = self.clip(cid)
+                if c["mediaType"] != "audio" and c["mediaType"] not in ("video",):
+                    raise ValueError("Denoise applies to clips with audio")
+                c["denoise"] = None if not enabled else dict(strength=strength)
+            return dict(clipIds=clip_ids, enabled=enabled)
+        return self.mutate("Denoise audio", action)
+
+    def set_keyframes(self, clip_id, tracks):
+        if not tracks:
+            raise ValueError("tracks must not be empty")
+        allowed = {"opacity", "volume", "rotation", "scale", "position", "crop"}
+        def action():
+            _, c = self.clip(clip_id)
+            store = dict(c.get("keyframes") or {})
+            for name, keys in tracks.items():
+                if name not in allowed:
+                    raise ValueError("Unknown keyframe track: " + name)
+                if not isinstance(keys, list) or not keys:
+                    raise ValueError("Keyframe track must be a non-empty list")
+                for k in keys:
+                    integer(k.get("frame", 0), "keyframe frame")
+                    if not math.isfinite(k.get("value", 0)):
+                        raise ValueError("Keyframe value must be finite")
+                store[name] = sorted(keys, key=lambda k: k["frame"])
+            c["keyframes"] = store
+            return dict(clipId=clip_id, tracks=sorted(store))
+        return self.mutate("Set keyframes", action)
+
+    def gaps(self, track_index):
+        track = self.timeline["tracks"][integer(track_index, "trackIndex")]
+        if integer(track_index, "trackIndex") >= len(self.timeline["tracks"]):
+            raise ValueError("Unknown trackIndex")
+        spans = sorted((c["startFrame"], end(c)) for c in track["clips"])
+        out, cursor = [], 0
+        for s, e in spans:
+            if s > cursor:
+                out.append([cursor, s])
+            cursor = max(cursor, e)
+        return out
