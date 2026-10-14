@@ -450,7 +450,8 @@ class Window(QMainWindow):
         for key,label in [("startFrame","Start frame"),("durationFrames","Duration frames"),("trimStartFrame","Source trim"),("volumeDb","Volume dB"),("speed","Speed"),("opacity","Opacity"),("fadeInFrames","Fade in frames"),("fadeOutFrames","Fade out frames"),
                           ("exposure","Exposure"),("contrast","Contrast"),("saturation","Saturation"),("temperature","Temperature")]:
             field=QDoubleSpinBox() if key in ("volumeDb","speed","opacity","exposure","contrast","saturation","temperature") else QSpinBox()
-            field.setDecimals(3 if key in ("opacity","speed") else 2 if key in ("volumeDb","exposure","contrast","saturation","temperature") else 0)
+            if hasattr(field, "setDecimals"):
+                field.setDecimals(3 if key in ("opacity","speed") else 2 if key in ("volumeDb","exposure","contrast","saturation","temperature") else 0)
             if key=="volumeDb": low,high=-60,15
             elif key=="speed": low,high=.05,16
             elif key=="opacity": low,high=0,1
