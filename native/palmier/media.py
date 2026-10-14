@@ -67,8 +67,15 @@ def probe(file):
         raise ValueError("Media has no finite positive duration")
     fps = 0.0
     if video:
-        a, b = video.get("avg_frame_rate", "0/1").split("/")
-        fps = float(a)/float(b) if float(b) else 0
+        rate = str(video.get("avg_frame_rate") or "0/1")
+        parts = rate.split("/")
+        try:
+            if len(parts) == 2 and float(parts[1]):
+                fps = float(parts[0]) / float(parts[1])
+            else:
+                fps = float(parts[0])
+        except (ValueError, ZeroDivisionError, IndexError):
+            fps = 0.0
     return dict(id=uid(), name=file.name, type="image" if image else "video" if video else "audio",
                 source={"external": {"absolutePath": str(file)}}, duration=duration,
                 sourceWidth=video.get("width", 0) if video else 0,
@@ -102,22 +109,31 @@ def color_filter(color):
     if not color:
         return ""
     parts = []
-    exposure = color.get("exposure", 0)
-    contrast = color.get("contrast", 0)
-    saturation = color.get("saturation", 0)
+    exposure = float(color.get("exposure", 0) or 0)
+    contrast = float(color.get("contrast", 0) or 0)
+    saturation = float(color.get("saturation", 0) or 0)
     if exposure or contrast or saturation:
         brightness = max(-1, min(1, exposure / 4))
         eq_contrast = max(0.1, 1 + contrast / 4)
         eq_sat = max(0, 1 + saturation / 2)
         parts.append(f"eq=brightness={brightness:.3f}:contrast={eq_contrast:.3f}:saturation={eq_sat:.3f}")
-    temp = color.get("temperature", 0)
+    temp = float(color.get("temperature", 0) or 0)
     if temp:
         warm = max(-1, min(1, temp / 5))
         parts.append(f"colorbalance=rs={warm * .2:.3f}:bs={-warm * .25:.3f}:rm={warm * .1:.3f}:bm={-warm * .12:.3f}")
-    if color.get("highlights"):
-        parts.append(f"eq=highlight={max(-1, min(1, color['highlights'] / 8)):.3f}")
-    if color.get("shadows"):
-        parts.append(f"eq=shadow={max(-1, min(1, color['shadows'] / 8)):.3f}")
+    shadows = float(color.get("shadows", 0) or 0)
+    highlights = float(color.get("highlights", 0) or 0)
+    if shadows or highlights:
+        # ffmpeg eq has gamma, not highlight/shadow knobs. Gamma lifts or crushes the low end;
+        # gamma_weight pulls that curve off the highlights.
+        gamma = max(0.1, min(10, 1 - max(-1, min(1, shadows / 8)) * 0.75))
+        weight = max(0, min(1, 0.5 + max(-1, min(1, highlights / 8)) * 0.5))
+        parts.append(f"eq=gamma={gamma:.3f}:gamma_weight={weight:.3f}")
+    sharpen = float(color.get("sharpen", 0) or 0)
+    if sharpen > 0:
+        parts.append(f"unsharp=5:5:{max(0.1, min(2, sharpen / 5)):.2f}:5:5:0")
+    elif sharpen < 0:
+        parts.append(f"gblur=sigma={max(0.3, min(5, abs(sharpen) / 4)):.2f}")
     return ("," + ",".join(parts)) if parts else ""
 
 
@@ -158,8 +174,6 @@ def filter_graph(editor, timeline, work, resolution="Match Timeline"):
     filters, audios, visual, index, count = [], ["1:a"], "0:v", 2, 0
     for track in reversed(timeline["tracks"]):
         for c in sorted(track["clips"], key=lambda c: c["startFrame"]):
-            if track.get("hidden") and c.get("mediaType") != "audio":
-                continue
             assert_renderable(c)
             start, length = c["startFrame"] / fps, c["durationFrames"] / fps
             speed, opacity = c.get("speed", 1), c.get("opacity", 1)
@@ -167,6 +181,9 @@ def filter_graph(editor, timeline, work, resolution="Match Timeline"):
             n = count
             count += 1
             if c["mediaType"] == "text":
+                if track.get("hidden"):
+                    count -= 1
+                    continue
                 animation = c.get("textAnimation")
                 if animation and animation.get("preset", "off") != "off":
                     raise ValueError("Animated text is not implemented")
@@ -199,12 +216,17 @@ def filter_graph(editor, timeline, work, resolution="Match Timeline"):
             file = editor.media_path(m)
             if not file.is_file():
                 raise ValueError("Missing media: " + str(file))
+            wants_visual = c["mediaType"] != "audio" and not track.get("hidden")
+            wants_audio = bool(m.get("hasAudio")) and not track.get("muted")
+            if not wants_visual and not wants_audio:
+                count -= 1
+                continue
             if m["type"] == "image":
                 args.extend(["-loop", "1"])
             args.extend(["-ss", str(c.get("trimStartFrame", 0)/fps), "-t", str(length*speed), "-i", str(file)])
             source = index
             index += 1
-            if c["mediaType"] != "audio":
+            if wants_visual:
                 tr = c.get("transform", {}) or {}
                 cr = c.get("crop", {}) or {}
                 cx = float(tr.get("centerX", .5))
@@ -215,13 +237,17 @@ def filter_graph(editor, timeline, work, resolution="Match Timeline"):
                 slot_h = max(2, round(height * th / 2) * 2)
                 ox = round(cx * width - slot_w / 2)
                 oy = round(cy * height - slot_h / 2)
-                chain = [f"setpts=(PTS-STARTPTS)/{speed}", f"fps={fps}"]
+                chain = [f"setpts=(PTS-STARTPTS)/{speed}", f"fps={fps}", "format=rgba"]
                 if any(cr.values()):
                     l, t, r, b = (float(cr.get(k, 0)) for k in ("left", "top", "right", "bottom"))
                     chain.append(f"crop=w='iw*{1 - l - r:.4f}':h='ih*{1 - t - b:.4f}':x='iw*{l:.4f}':y='ih*{t:.4f}'")
-                chain.append(f"scale={slot_w}:{slot_h}:force_original_aspect_ratio=increase")
-                chain.append(f"crop={slot_w}:{slot_h}")
-                chain.append("format=rgba")
+                fit = tr.get("fit", "cover")
+                if fit == "fit":
+                    chain.append(f"scale={slot_w}:{slot_h}:force_original_aspect_ratio=decrease")
+                    chain.append(f"pad={slot_w}:{slot_h}:(ow-iw)/2:(oh-ih)/2:color=black@0")
+                else:
+                    chain.append(f"scale={slot_w}:{slot_h}:force_original_aspect_ratio=increase")
+                    chain.append(f"crop={slot_w}:{slot_h}")
                 if tr.get("flipHorizontal"):
                     chain.append("hflip")
                 if tr.get("flipVertical"):
@@ -238,7 +264,7 @@ def filter_graph(editor, timeline, work, resolution="Match Timeline"):
                 filters.append(f"[{source}:v]{vf},setpts=PTS+{start}/TB[layer{n}]")
                 filters.append(f"[{visual}][layer{n}]overlay=x={ox}:y={oy}:eof_action=pass:repeatlast=0:enable='gte(t,{start})*lt(t,{start+length})'[v{n}]")
                 visual = f"v{n}"
-            if m.get("hasAudio") and not track.get("muted"):
+            if wants_audio:
                 remaining, tempo = speed, []
                 while remaining > 2:
                     tempo.append("atempo=2")
@@ -422,10 +448,16 @@ def capture_frame(editor, timeline, frame, destination):
 
 
 def detect_silence(path, noise_db=-35, min_len=0.5):
-    out = run([executable("ffmpeg"), "-hide_banner", "-i", str(path),
-               "-af", f"silencedetect=noise={noise_db}dB:d={min_len}",
-               "-f", "null", "-"], timeout=120,
-              stderr=subprocess.STDOUT).stdout.decode("utf-8", errors="replace")
+    noise_db, min_len = float(noise_db), float(min_len)
+    if not math.isfinite(noise_db) or not -90 <= noise_db <= 0:
+        raise ValueError("thresholdDb must be between -90 and 0")
+    if not math.isfinite(min_len) or not 0.05 <= min_len <= 30:
+        raise ValueError("minLength must be between 0.05 and 30 seconds")
+    proc = subprocess.run([executable("ffmpeg"), "-hide_banner", "-i", str(path),
+                           "-af", f"silencedetect=noise={noise_db:.3f}dB:d={min_len:.3f}",
+                           "-f", "null", "-"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          creationflags=CREATE_NO_WINDOW, timeout=120)
+    out = proc.stdout.decode("utf-8", errors="replace")
     spans, start = [], None
     for line in out.splitlines():
         m0 = re.search(r"silence_start:\s*([\d.]+)", line)
@@ -435,7 +467,23 @@ def detect_silence(path, noise_db=-35, min_len=0.5):
         elif m1 and start is not None:
             spans.append([start, float(m1.group(1))])
             start = None
+    if proc.returncode != 0 and not spans:
+        raise RuntimeError(out[-500:] or "silencedetect failed")
     return spans
+
+
+def timeline_silence_ranges(clip, silence_spans, fps, track_index, min_frames=1):
+    trim = clip.get("trimStartFrame", 0)
+    speed = clip.get("speed", 1) or 1
+    start, finish = clip["startFrame"], end(clip)
+    ranges = []
+    for s0, s1 in silence_spans:
+        f0 = start + round((s0 - trim / fps) / speed * fps)
+        f1 = start + round((s1 - trim / fps) / speed * fps)
+        f0, f1 = max(start, f0), min(finish, f1)
+        if f1 - f0 >= min_frames:
+            ranges.append(dict(trackIndex=track_index, startFrame=f0, endFrame=f1))
+    return ranges
 
 
 @lru_cache(maxsize=1)

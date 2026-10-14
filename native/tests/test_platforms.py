@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from palmier.platforms import text_font,desktop_name
+from palmier.platforms import text_font,desktop_name,ui_font,hw_hint
 from palmier.media import parse_ffmpeg_major,filter_file_option
 
 
@@ -40,3 +40,17 @@ class PlatformTests(unittest.TestCase):
 
     def test_current_host_name_is_desktop_specific(self):
         self.assertIn(desktop_name(),("Palmier Pro Windows","Palmier Pro Linux"))
+
+    def test_ui_font_uses_an_installed_family(self):
+        ui_font.cache_clear()
+        with patch("palmier.platforms._font_families", return_value={"liberation sans", "dejavu sans"}):
+            self.assertEqual(ui_font(), "DejaVu Sans")
+        ui_font.cache_clear()
+        with patch("palmier.platforms._font_families", return_value=set()):
+            self.assertEqual(ui_font(), "DejaVu Sans")
+        ui_font.cache_clear()
+
+    def test_hw_hint_lists_real_encoders(self):
+        hint = hw_hint()
+        self.assertIn("ffmpeg", hint)
+        self.assertIsInstance(hint["encoders"], list)

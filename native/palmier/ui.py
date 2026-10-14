@@ -1,16 +1,18 @@
 import copy
+import html
 import json
 import math
+import subprocess
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from PySide6.QtCore import Qt, Signal, Slot, QObject, QTimer, QUrl, QRectF, QSize
-from PySide6.QtGui import QAction, QKeySequence, QPainter, QColor, QPen, QPixmap, QFont, QIcon
+from PySide6.QtCore import Qt, Signal, Slot, QObject, QTimer, QUrl, QRectF, QSize, QEvent
+from PySide6.QtGui import QAction, QKeySequence, QPainter, QColor, QPen, QPixmap, QFont, QIcon, QGuiApplication
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QLabel, QPushButton, QListWidget, QListWidgetItem, QAbstractScrollArea, QStackedWidget,
     QFileDialog, QMessageBox, QSlider, QFormLayout, QSpinBox, QDoubleSpinBox, QComboBox,
-    QDialog, QDialogButtonBox, QLineEdit, QTextEdit, QInputDialog, QProgressBar, QCheckBox, QListView)
+    QDialog, QDialogButtonBox, QLineEdit, QTextEdit, QInputDialog, QProgressBar, QCheckBox, QListView, QMenu)
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink, QVideoFrame
 from .model import Editor, end
 from .media import probe, render, duration, frozen_editor, ExportQueue, run, executable
@@ -64,6 +66,7 @@ class Bridge(QObject):
     changed = Signal()
     completed = Signal(object, object, object)
     playback = Signal(str, int)
+    progress = Signal(int, str)
 
 
 class Timeline(QAbstractScrollArea):
@@ -78,10 +81,13 @@ class Timeline(QAbstractScrollArea):
         self.selected_id = None
         self.drag = None
         self.ghost = None
+        self.snap = True
         self.setMinimumHeight(170)
         self.setAcceptDrops(True)
         self.viewport().setAcceptDrops(True)
         self.setFocusPolicy(Qt.StrongFocus)
+        self.viewport().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.viewport().customContextMenuRequested.connect(self.context_menu)
         self.horizontalScrollBar().valueChanged.connect(lambda _: self.viewport().update())
         self.verticalScrollBar().valueChanged.connect(lambda _: self.viewport().update())
 
@@ -180,9 +186,15 @@ class Timeline(QAbstractScrollArea):
             p.fillRect(QRectF(0,y,header_h,row_h),QColor("#14171D"))
             p.setPen(QColor("#9AA3B5"))
             p.drawText(QRectF(12,y,100,row_h),Qt.AlignVCenter, tr.get("name") or (("A" if tr["type"]=="audio" else "V")+str(i+1)))
-            kind_badge = "M" if tr.get("muted") else ("♪" if tr["type"]=="audio" else "◉")
-            p.setPen(QColor("#E8B44F" if tr.get("muted") else "#9AA3B5"))
-            p.drawText(QRectF(118,y,36,row_h),Qt.AlignCenter, kind_badge)
+            flags = ""
+            if tr.get("muted"):
+                flags += "M"
+            if tr.get("hidden"):
+                flags += "H"
+            if not flags:
+                flags = "♪" if tr["type"]=="audio" else "●"
+            p.setPen(QColor("#E8B44F" if tr.get("muted") or tr.get("hidden") else "#9AA3B5"))
+            p.drawText(QRectF(118,y,36,row_h),Qt.AlignCenter, flags)
             if tr.get("syncLocked", True):
                 p.setPen(QColor("#3FB97F"))
                 p.drawText(QRectF(140,y,18,row_h),Qt.AlignCenter,"⚡")
@@ -194,6 +206,7 @@ class Timeline(QAbstractScrollArea):
                 p.setPen(QColor(m.get("color", "#E8B44F")))
                 p.drawLine(round(x), ruler_h, round(x), ruler_h+marker_h)
                 p.fillRect(QRectF(x, ruler_h, 8, 8), QColor(m.get("color", "#E8B44F")))
+                p.drawText(QRectF(x+10, ruler_h, 90, marker_h), Qt.AlignVCenter, str(m.get("name", ""))[:18])
         step = max(1, math.ceil(70/self.scale/self.t["fps"])) * self.t["fps"]
         first = self.frame_at(160)//step*step
         p.setPen(QColor("#949499"))
@@ -253,17 +266,39 @@ class Timeline(QAbstractScrollArea):
             self.drag = dict(row=row, clip=copy.deepcopy(c), x=event.position().x(), mode=mode)
             self.viewport().update()
 
+    def snap_frame(self, frame, exclude_id=None):
+        if not self.snap:
+            return max(0, frame)
+        points = [self.frame, 0]
+        for tr in self.t["tracks"]:
+            for c in tr["clips"]:
+                if c["id"] == exclude_id:
+                    continue
+                points.append(c["startFrame"])
+                points.append(end(c))
+        threshold = max(1, round(8 / max(self.scale, 0.2)))
+        best, best_distance = frame, threshold + 1
+        for point in points:
+            distance = abs(point - frame)
+            if distance < best_distance:
+                best, best_distance = point, distance
+        return max(0, best)
+
     def mouseMoveEvent(self, event):
         if self.drag:
             c=self.drag["clip"]
             delta=round((event.position().x()-self.drag["x"])/self.scale)
             if self.drag["mode"]=="move":
                 row=max(0,min(len(self.t["tracks"])-1,self.row_at(event.position().y())))
-                self.ghost=(max(0,c["startFrame"]+delta),c["durationFrames"],row)
+                start=self.snap_frame(max(0,c["startFrame"]+delta), c["id"])
+                self.ghost=(start,c["durationFrames"],row)
             elif self.drag["mode"]=="right":
-                self.ghost=(c["startFrame"],max(1,c["durationFrames"]+delta),self.drag["row"])
+                length=max(1,c["durationFrames"]+delta)
+                end_frame=self.snap_frame(c["startFrame"]+length, c["id"])
+                self.ghost=(c["startFrame"],max(1,end_frame-c["startFrame"]),self.drag["row"])
             else:
                 start=max(0,min(end(c)-1,c["startFrame"]+delta))
+                start=min(self.snap_frame(start, c["id"]), end(c)-1)
                 self.ghost=(start,end(c)-start,self.drag["row"])
             self.viewport().update()
 
@@ -280,7 +315,7 @@ class Timeline(QAbstractScrollArea):
                 else:
                     def trim():
                         self.editor.properties([c["id"]],dict(durationFrames=length,trimStartFrame=c.get("trimStartFrame",0)+round((start-c["startFrame"])*c.get("speed",1))))
-                        self.editor.move([dict(clipId=c["id"],toFrame=start)])
+                        self.editor.move([dict(clipId=c["id"],toFrame=start)], follow_links=False)
                     self.editor.mutate("Trim start",trim)
             self.window().act(edit)
         self.drag=self.ghost=None
@@ -296,9 +331,43 @@ class Timeline(QAbstractScrollArea):
     def dropEvent(self,event):
         row=self.row_at(event.position().y())
         frame=self.frame_at(event.position().x())
-        payload = json.loads(bytes(event.mimeData().data("application/x-palmier-media"))) if event.mimeData().hasFormat("application/x-palmier-media") else [u.toLocalFile() for u in event.mimeData().urls()]
-        self.mediaDropped.emit(payload,frame,row)
+        try:
+            if event.mimeData().hasFormat("application/x-palmier-media"):
+                payload = json.loads(bytes(event.mimeData().data("application/x-palmier-media")))
+                if not isinstance(payload, list) or not all(isinstance(item, str) for item in payload):
+                    raise ValueError("Dropped media is not a list of ids")
+            else:
+                payload = [u.toLocalFile() for u in event.mimeData().urls() if u.toLocalFile()]
+        except Exception:
+            self.window().statusBar().showMessage("Could not read the dropped item", 8000)
+            event.ignore()
+            return
+        if payload:
+            self.mediaDropped.emit(payload,frame,row)
         event.acceptProposedAction()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down, Qt.Key_Home, Qt.Key_End, Qt.Key_BracketLeft, Qt.Key_BracketRight):
+            self.window().keyPressEvent(event)
+            return
+        super().keyPressEvent(event)
+
+    def context_menu(self, pos):
+        menu = QMenu(self)
+        win = self.window()
+        hit = self.hit(pos) if hasattr(self, "t") else None
+        if hit:
+            _, clip = hit
+            self.selected_id = clip["id"]
+            self.selected.emit(clip["id"])
+            self.viewport().update()
+            menu.addAction("Split at playhead", win.split_selected)
+            menu.addAction("Duplicate", win.duplicate_selected)
+            menu.addAction("Ripple delete", win.ripple_delete_selected)
+            menu.addAction("Delete", win.delete_selected)
+            menu.addSeparator()
+        menu.addAction("Paste", win.paste_selected)
+        menu.exec(self.viewport().mapToGlobal(pos))
 
 
 class MediaList(QListWidget):
@@ -332,7 +401,9 @@ class Window(QMainWindow):
         self.bridge.changed.connect(self.refresh)
         self.bridge.completed.connect(self.finish_task, Qt.QueuedConnection)
         self.bridge.playback.connect(self.control_playback)
+        self.bridge.progress.connect(self.show_progress)
         self.tools.playback=self.bridge.playback.emit
+        self.progress_owner=None
         self.pool=ThreadPoolExecutor(max_workers=2)
         self.cache=tempfile.TemporaryDirectory(prefix="palmier-preview-")
         self.preview_cancel=threading.Event()
@@ -352,6 +423,7 @@ class Window(QMainWindow):
         self.player.setAudioOutput(self.audio)
         self.audio.setVolume(1)
         self.player.positionChanged.connect(self.play_position)
+        self.player.playbackStateChanged.connect(self.sync_play_button)
         self.player.errorOccurred.connect(lambda error,msg: self.statusBar().showMessage("Playback: "+msg,15000))
         self.build_ui()
         self.build_menu()
@@ -361,6 +433,7 @@ class Window(QMainWindow):
         except OSError as error:
             self.mcp=None
             self.connection.setText("MCP unavailable: "+str(error))
+        self.write_agent_intro()
         self.refresh()
         self.poll=QTimer(self)
         self.poll.timeout.connect(self.refresh_exports)
@@ -382,7 +455,7 @@ class Window(QMainWindow):
         agent,al=self.panel("Agent")
         self.chat_log=QTextEdit()
         self.chat_log.setReadOnly(True)
-        self.chat_log.setPlainText("Palmier Pro Linux · MCP ready:\n\nhttp://127.0.0.1:19789/mcp\n\nOpenCode: add a remote MCP server named palmier-pro with this URL, restart OpenCode, keep the editor open.\n\nCodex: codex mcp add palmier-pro --url http://127.0.0.1:19789/mcp\n\n53 tools: markers, ripple insert/delete, layouts, captions, color, effects, denoise, links, keyframes, capture_frame and more. Generation tools honestly report canGenerate:false (no subscription backend in this GPL port).")
+        self.chat_log.setPlainText("Starting MCP…")
         al.addWidget(self.chat_log)
         self.chat_input=QLineEdit()
         self.chat_input.setPlaceholderText("Ask your agent…")
@@ -398,14 +471,20 @@ class Window(QMainWindow):
         work=QSplitter(Qt.Vertical)
         top=QSplitter(Qt.Horizontal)
         media,ml=self.panel("Library")
-        import_button=QPushButton("+ Import")
-        import_button.clicked.connect(self.import_dialog)
-        ml.addWidget(import_button)
+        self.import_button=QPushButton("+ Import")
+        self.import_button.clicked.connect(self.import_dialog)
+        ml.addWidget(self.import_button)
         self.search=QLineEdit()
         self.search.setPlaceholderText("Search media")
         self.search.textChanged.connect(self.filter_media)
         ml.addWidget(self.search)
+        self.library_empty=QLabel("No media yet. Import a file or drop it on the timeline.")
+        self.library_empty.setWordWrap(True)
+        self.library_empty.setStyleSheet("color:#9AA3B5;padding:8px;")
+        ml.addWidget(self.library_empty)
         self.library=MediaList()
+        self.library.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.library.customContextMenuRequested.connect(self.library_menu)
         self.library.itemDoubleClicked.connect(lambda item:self.place_media([item.data(Qt.UserRole)],self.editor.current_frame,-1))
         ml.addWidget(self.library)
         media.setMinimumWidth(240)
@@ -430,10 +509,14 @@ class Window(QMainWindow):
         controls.setSpacing(8)
         self.timecode=QLabel("00:00:00:00")
         self.timecode.setStyleSheet("color:#E8B44F;font-family:monospace;font-size:15px;font-weight:700;background:#141821;padding:6px 12px;border-radius:8px;")
+        self.timecode.setToolTip("Click to copy the timecode")
+        self.timecode.installEventFilter(self)
         controls.addWidget(self.timecode)
-        for label,callback in [("◀",lambda:self.seek(max(0,self.editor.current_frame-1))), ("▶ / Ⅱ",self.toggle_play), ("▶|",lambda:self.seek(self.editor.current_frame+1))]:
+        for label,callback in [("◀",lambda:self.seek(max(0,self.editor.current_frame-1))), ("Play",self.toggle_play), ("▶|",lambda:self.seek(self.editor.current_frame+1))]:
             button=QPushButton(label)
             button.clicked.connect(callback)
+            if callback==self.toggle_play:
+                self.play_button=button
             controls.addWidget(button)
         pl.addLayout(controls)
         top.addWidget(preview)
@@ -447,18 +530,21 @@ class Window(QMainWindow):
         self.clip_meta.setStyleSheet("color:#9AA3B5;")
         il.addWidget(self.clip_meta)
         self.fields={}
+        color_keys = ("volumeDb","speed","opacity","exposure","contrast","saturation","temperature","highlights","shadows")
         for key,label in [("startFrame","Start frame"),("durationFrames","Duration frames"),("trimStartFrame","Source trim"),("volumeDb","Volume dB"),("speed","Speed"),("opacity","Opacity"),("fadeInFrames","Fade in frames"),("fadeOutFrames","Fade out frames"),
-                          ("exposure","Exposure"),("contrast","Contrast"),("saturation","Saturation"),("temperature","Temperature")]:
-            field=QDoubleSpinBox() if key in ("volumeDb","speed","opacity","exposure","contrast","saturation","temperature") else QSpinBox()
+                          ("exposure","Exposure"),("contrast","Contrast"),("saturation","Saturation"),("temperature","Temperature"),("highlights","Highlights"),("shadows","Shadows")]:
+            field=QDoubleSpinBox() if key in color_keys else QSpinBox()
             if hasattr(field, "setDecimals"):
-                field.setDecimals(3 if key in ("opacity","speed") else 2 if key in ("volumeDb","exposure","contrast","saturation","temperature") else 0)
+                field.setDecimals(3 if key in ("opacity","speed") else 2 if key in color_keys else 0)
             if key=="volumeDb": low,high=-60,15
             elif key=="speed": low,high=.05,16
             elif key=="opacity": low,high=0,1
-            elif key in ("exposure","contrast","saturation","temperature"): low,high=-5,5
+            elif key in ("exposure","contrast","saturation","temperature","highlights","shadows"): low,high=-10,10
             elif key=="durationFrames": low,high=1,100_000_000
             else: low,high=0,100_000_000
             field.setRange(low,high)
+            if key in ("exposure","contrast","saturation","temperature","highlights","shadows"):
+                field.setSingleStep(0.1)
             form.addRow(label,field)
             self.fields[key]=field
         il.addLayout(form)
@@ -474,7 +560,7 @@ class Window(QMainWindow):
         fx_add.clicked.connect(self.apply_effect_ui)
         row2.addWidget(fx_add)
         fx_clear=QPushButton("Clear FX")
-        fx_clear.clicked.connect(lambda:self.act(lambda:self.editor.apply_effect([self.selected_id],[])) if self.selected_id else None)
+        fx_clear.clicked.connect(self.clear_effects_ui)
         row2.addWidget(fx_clear)
         il.addLayout(row2)
         row3=QHBoxLayout()
@@ -503,10 +589,11 @@ class Window(QMainWindow):
         bl.setContentsMargins(0,0,0,0)
         toolbar=QHBoxLayout()
         toolbar.setSpacing(6)
-        for text,callback,tip in [("↶",lambda:self.act(self.editor.undo),"Undo (Ctrl+Z)"),("↷",lambda:self.act(lambda:self.editor.undo(True)),"Redo (Ctrl+Shift+Z)"),
-                              ("Split",self.split_selected,"Split at playhead (Ctrl+K)"),("Delete",self.delete_selected,"Delete clip (Del)"),("[",lambda:self.trim_playhead(True),"Trim start to playhead"),("]",lambda:self.trim_playhead(False),"Trim end to playhead"),
-                              ("T",self.add_text,"Add text"),("✦ Marker",self.add_marker_ui,"Add marker at playhead"),("CC",self.add_caption_ui,"Add caption"),
-                              ("▦ Layout",self.apply_layout_ui,"Split-screen / PiP layout"),
+        for text,callback,tip in [("Undo",lambda:self.act(self.editor.undo),"Undo (Ctrl+Z)"),("Redo",lambda:self.act(lambda:self.editor.undo(True)),"Redo (Ctrl+Shift+Z)"),
+                              ("Split",self.split_selected,"Split at playhead (Ctrl+K)"),("Delete",self.delete_selected,"Delete clip (Del)"),
+                              ("[",lambda:self.trim_playhead(True),"Trim start to playhead"),("]",lambda:self.trim_playhead(False),"Trim end to playhead"),
+                              ("T",self.add_text,"Add text"),("Marker",self.add_marker_ui,"Add marker at playhead"),("CC",self.add_caption_ui,"Add caption"),
+                              ("Layout",self.apply_layout_ui,"Split-screen / PiP layout"),
                               ("+ V",lambda:self.act(lambda:self.editor.add_track("video")),"Add video track"),("+ A",lambda:self.act(lambda:self.editor.add_track("audio")),"Add audio track"),
                               ("Export",self.export_dialog,"Export (Ctrl+E)")]:
             b=QPushButton(text)
@@ -515,6 +602,11 @@ class Window(QMainWindow):
                 b.setObjectName("accent")
             b.clicked.connect(callback)
             toolbar.addWidget(b)
+        self.snap_box=QCheckBox("Snap")
+        self.snap_box.setChecked(True)
+        self.snap_box.setToolTip("Snap clip edges to the playhead and other edits while dragging")
+        self.snap_box.toggled.connect(lambda checked: setattr(self.timeline, "snap", checked))
+        toolbar.addWidget(self.snap_box)
         toolbar.addStretch()
         self.zoom=QSlider(Qt.Horizontal)
         self.zoom.setRange(2,120)
@@ -535,6 +627,9 @@ class Window(QMainWindow):
         outer.addWidget(work)
         outer.setSizes([240,1200])
         self.setCentralWidget(outer)
+        self.summary=QLabel()
+        self.summary.setStyleSheet("color:#9AA3B5;")
+        self.statusBar().addWidget(self.summary)
         self.connection=QLabel()
         self.statusBar().addPermanentWidget(self.connection)
         self.progress=QProgressBar()
@@ -556,18 +651,61 @@ class Window(QMainWindow):
             menu.addAction(a)
         for label,key,call in [("New project","Ctrl+N",self.new_project),("Open project…","Ctrl+O",self.open_project),("Save","Ctrl+S",self.save_project),("Save As…","Ctrl+Shift+S",lambda:self.save_project(True)),("Import media…","Ctrl+I",self.import_dialog),("Export…","Ctrl+E",self.export_dialog),("Quit","Ctrl+Q",self.close)]:
             action(file,label,key,call)
-        for label,key,call in [("Undo","Ctrl+Z",lambda:self.act(self.editor.undo)),("Redo","Ctrl+Shift+Z",lambda:self.act(lambda:self.editor.undo(True))),("Split at playhead","Ctrl+K",self.split_selected),("Delete clip","Delete",self.delete_selected),("Cut clip","Ctrl+X",self.cut_selected),("Copy clip","Ctrl+C",self.copy_selected),("Paste clip","Ctrl+V",self.paste_selected)]:
+        for label,key,call in [("Undo","Ctrl+Z",lambda:self.act(self.editor.undo)),("Redo","Ctrl+Shift+Z",lambda:self.act(lambda:self.editor.undo(True))),("Split at playhead","Ctrl+K",self.split_selected),("Delete clip","Delete",self.delete_selected),("Ripple delete","Shift+Delete",self.ripple_delete_selected),("Duplicate clip","Ctrl+D",self.duplicate_selected),("Cut clip","Ctrl+X",self.cut_selected),("Copy clip","Ctrl+C",self.copy_selected),("Paste clip","Ctrl+V",self.paste_selected)]:
             action(edit,label,key,call)
         action(playback,"Play / Pause","Space",self.toggle_play)
-        action(help_menu,"MCP connection instructions",None,lambda:QMessageBox.information(self,"MCP",self.connection.text()+"\n\nOpenCode: add mcp.palmier-pro with type remote, url http://127.0.0.1:19789/mcp and enabled true in ~/.config/opencode/opencode.jsonc; restart OpenCode.\n\ncodex mcp add palmier-pro --url http://127.0.0.1:19789/mcp\n\nOnly implemented tool subsets are advertised. Loopback only; browser origins refused. Optional PALMIER_MCP_TOKEN requires a Bearer header."))
+        action(playback,"Previous edit",None,lambda:self.jump_edit(-1))
+        action(playback,"Next edit",None,lambda:self.jump_edit(1))
+        action(help_menu,"Keyboard shortcuts",None,self.show_shortcuts)
+        action(help_menu,"MCP connection instructions",None,self.show_mcp_help)
         action(help_menu,"About / License",None,lambda:QMessageBox.information(self,desktop_name(),f"GPLv3 development port · {VERSION}\nBased on Palmier, Inc. last-gpl-source.\nNative Qt 6 / FFmpeg. Not feature-complete or pixel-perfect.\nSee README, LICENSE and third-party notices."))
         action(help_menu,"About Qt",None,lambda:QMessageBox.aboutQt(self,"Qt licensing"))
+
+    def mcp_url(self):
+        port = self.mcp.port if getattr(self, "mcp", None) else 19789
+        return f"http://127.0.0.1:{port}/mcp"
+
+    def write_agent_intro(self):
+        url = self.mcp_url()
+        self.chat_log.setPlainText(
+            "Palmier Pro Linux\n\n"
+            f"MCP  {url}\n\n"
+            "OpenCode: add a remote MCP server named palmier-pro with this URL, restart OpenCode, and keep this window open.\n\n"
+            f"Codex: codex mcp add palmier-pro --url {url}\n\n"
+            "Editing, markers, ripple, layouts, captions, color, effects and export work offline. "
+            "Generation tools report canGenerate:false — this GPL port has no subscription backend.\n\n"
+            "BYOK chat uses OPENAI_API_KEY. It cannot import, export, or switch projects."
+        )
+
+    def show_mcp_help(self):
+        url = self.mcp_url()
+        QMessageBox.information(self, "MCP", self.connection.text() +
+            f"\n\nOpenCode: add mcp.palmier-pro with type remote and url {url} in ~/.config/opencode/opencode.jsonc, then restart OpenCode.\n\n"
+            f"codex mcp add palmier-pro --url {url}\n\n"
+            "Loopback only; browser origins are refused. Set PALMIER_MCP_TOKEN to require Authorization: Bearer.")
+
+    def show_shortcuts(self):
+        QMessageBox.information(self, "Keyboard shortcuts",
+            "Space  play / pause\n"
+            "Left / Right  step one frame (Shift = five)\n"
+            "Up / Down  previous / next edit\n"
+            "Home / End  start / end of the timeline\n"
+            "Ctrl+K  split    Delete  delete    Shift+Delete  ripple delete\n"
+            "Ctrl+D  duplicate    Ctrl+C/X/V  copy, cut, paste\n"
+            "[ / ]  trim the selected clip to the playhead\n"
+            "Ctrl+Z / Ctrl+Shift+Z  undo / redo\n"
+            "Ctrl+I import    Ctrl+S save    Ctrl+E export\n"
+            "Click a timecode to copy it. Right-click a clip or a library item for more actions.")
 
     def act(self,callback):
         try:
             return callback()
         except Exception as error:
-            QMessageBox.warning(self,"Palmier Pro",str(error))
+            message = str(error)
+            if message.startswith("Nothing to "):
+                self.statusBar().showMessage(message, 4000)
+                return None
+            QMessageBox.warning(self,"Palmier Pro",message)
 
     def task(self,function,callback):
         future=self.pool.submit(function)
@@ -585,6 +723,23 @@ class Window(QMainWindow):
     def finish_task(self,callback,result,error):
         callback(result,error)
 
+    def show_progress(self, value, label):
+        self.progress_owner = label
+        self.progress.show()
+        self.progress.setValue(max(0, min(100, int(value))))
+        self.progress.setFormat(label + " %p%")
+        if value >= 100 and label != "Export":
+            QTimer.singleShot(700, self.hide_idle_progress)
+
+    def hide_idle_progress(self):
+        if self.progress_owner != "Export":
+            self.progress.hide()
+            self.progress_owner = None
+
+    def inspector_editing(self):
+        focus = self.focusWidget()
+        return focus in self.fields.values() or focus is self.text_content
+
     @Slot()
     def refresh(self):
         if self.closing:
@@ -593,9 +748,13 @@ class Window(QMainWindow):
             self.preview_cancel.set()
         self.setWindowTitle(self.editor.name+(" *" if self.editor.dirty else "")+" — "+desktop_name())
         self.timeline.refresh()
+        fps = self.editor.timeline["fps"] or 1
+        frames = duration(self.editor.timeline)
+        self.summary.setText(f"{self.editor.timeline['width']}×{self.editor.timeline['height']}  ·  {self.editor.timeline['fps']} fps  ·  {frames / fps:.2f}s")
         with self.editor.lock:
             media=copy.deepcopy(self.editor.manifest["entries"])
         selected=self.library.currentItem().data(Qt.UserRole) if self.library.currentItem() else None
+        scroll=self.library.verticalScrollBar().value()
         self.library.clear()
         for m in media:
             try:
@@ -624,27 +783,47 @@ class Window(QMainWindow):
                     run(args+["-frames:v","1",str(target)],timeout=60)
                     return target
                 def ready(file,error,mid=mid):
-                    if not error:
-                        if len(self.images)>=256:
-                            del self.images[next(iter(self.images))]
-                        self.images[mid]=QPixmap(str(file))
-                        self.refresh()
+                    self.thumbnail_pending.discard(mid)
+                    if error or not file or not Path(file).is_file():
+                        if error:
+                            self.statusBar().showMessage("Thumbnail failed: "+str(error)[-180:], 8000)
+                        return
+                    if len(self.images)>=256:
+                        del self.images[next(iter(self.images))]
+                    self.images[mid]=QPixmap(str(file))
+                    self.refresh()
                 self.task(thumbnail,ready)
+        self.library.verticalScrollBar().setValue(scroll)
         self.filter_media()
         if self.preview_revision!=self.editor.revision and self.player.playbackState()==QMediaPlayer.PlayingState:
             self.player.pause()
             self.statusBar().showMessage("Timeline changed — press Play to rebuild composited playback")
-        if self.selected_id:
+        if self.selected_id and not self.inspector_editing():
             try:
                 self.select_clip(self.selected_id)
             except ValueError:
                 self.selected_id=None
+                self.timeline.selected_id=None
                 self.clip_label.setText("Select a clip")
+                self.clip_meta.setText("")
+                self.text_content.clear()
 
     def filter_media(self):
+        query=self.search.text().lower()
+        visible=0
         for i in range(self.library.count()):
             item=self.library.item(i)
-            item.setHidden(self.search.text().lower() not in item.text().lower())
+            hidden=query not in item.text().lower()
+            item.setHidden(hidden)
+            visible += not hidden
+        if not self.library.count():
+            self.library_empty.setText("No media yet. Import a file or drop it on the timeline.")
+            self.library_empty.show()
+        elif visible:
+            self.library_empty.hide()
+        else:
+            self.library_empty.setText("No media matches that search.")
+            self.library_empty.show()
 
     def select_clip(self,cid):
         self.selected_id=cid
@@ -658,11 +837,12 @@ class Window(QMainWindow):
             if c.get("effects"):
                 meta += f" · {len(c['effects'])} fx"
             self.clip_meta.setText(meta)
+            self.timeline.selected_id=cid
             color = c.get("color") or {}
             for key,field in self.fields.items():
                 if key == "volumeDb":
                     value = 20*math.log10(max(c.get("volume",1),.001))
-                elif key in ("exposure","contrast","saturation","temperature"):
+                elif key in ("exposure","contrast","saturation","temperature","highlights","shadows"):
                     value = float(color.get(key, 0))
                 else:
                     value = c.get(key,0)
@@ -675,18 +855,41 @@ class Window(QMainWindow):
 
     def apply_properties(self):
         if not self.selected_id:
+            self.statusBar().showMessage("Select a clip before applying properties", 4000)
             return
         def edit():
             def action():
-                basic = {k:f.value() for k,f in self.fields.items() if k not in ("startFrame","exposure","contrast","saturation","temperature")}
+                _, c = self.editor.clip(self.selected_id)
+                basic = {}
+                current_db = round(20*math.log10(max(c.get("volume",1),.001)), 2)
+                if abs(self.fields["volumeDb"].value() - current_db) > 0.001:
+                    basic["volumeDb"] = self.fields["volumeDb"].value()
+                for key in ("durationFrames","trimStartFrame","speed","opacity","fadeInFrames","fadeOutFrames"):
+                    value = self.fields[key].value()
+                    current = c.get("speed",1) if key=="speed" else c.get("opacity",1) if key=="opacity" else c.get(key,0)
+                    if abs(float(value) - float(current)) > 1e-6:
+                        basic[key] = value
                 if basic:
-                    self.editor.properties([self.selected_id],basic)
-                grade = {k:self.fields[k].value() for k in ("exposure","contrast","saturation","temperature") if abs(self.fields[k].value()) > 1e-9}
+                    self.editor.properties([self.selected_id], basic)
+                color = c.get("color") or {}
+                grade = {}
+                for key in ("exposure","contrast","saturation","temperature","highlights","shadows"):
+                    value = self.fields[key].value()
+                    if abs(value - float(color.get(key, 0))) > 1e-6:
+                        grade[key] = value
                 if grade:
-                    self.editor.apply_color([self.selected_id],grade)
-                self.editor.move([dict(clipId=self.selected_id,toFrame=self.fields["startFrame"].value())])
-            self.editor.mutate("Inspector edit",action)
+                    self.editor.apply_color([self.selected_id], grade)
+                start = int(self.fields["startFrame"].value())
+                if start != c["startFrame"]:
+                    self.editor.move([dict(clipId=self.selected_id, toFrame=start)], follow_links=False)
+            self.editor.mutate("Inspector edit", action)
         self.act(edit)
+
+    def clear_effects_ui(self):
+        if not self.selected_id:
+            self.statusBar().showMessage("Select a clip to clear effects", 4000)
+            return
+        self.act(lambda: self.editor.apply_effect([self.selected_id], []))
 
     def apply_effect_ui(self):
         if not self.selected_id:
@@ -711,6 +914,45 @@ class Window(QMainWindow):
     def delete_selected(self):
         if self.selected_id:
             self.act(lambda:self.editor.remove([self.selected_id]))
+
+    def ripple_delete_selected(self):
+        if not self.selected_id:
+            self.statusBar().showMessage("Select a clip to ripple-delete", 4000)
+            return
+        selected = self.selected_id
+        def action():
+            tr, c = self.editor.clip(selected)
+            index = self.editor.timeline["tracks"].index(tr)
+            self.editor.ripple_delete_ranges([dict(trackIndex=index, startFrame=c["startFrame"], endFrame=end(c))])
+        self.act(action)
+
+    def duplicate_selected(self):
+        if not self.selected_id:
+            self.statusBar().showMessage("Select a clip to duplicate", 4000)
+            return
+        selected = self.selected_id
+        def action():
+            result = self.editor.duplicate_clips([selected])
+            self.selected_id = result["clipIds"][0]
+            self.timeline.selected_id = self.selected_id
+        self.act(action)
+
+    def jump_edit(self, direction):
+        points = {0, duration(self.editor.timeline)}
+        for tr in self.editor.timeline["tracks"]:
+            for c in tr["clips"]:
+                points.add(c["startFrame"])
+                points.add(end(c))
+        for marker in self.editor.timeline.get("markers", []):
+            points.add(marker.get("startFrame", 0))
+        ordered = sorted(points)
+        frame = self.editor.current_frame
+        if direction < 0:
+            earlier = [point for point in ordered if point < frame]
+            self.seek(earlier[-1] if earlier else 0)
+        else:
+            later = [point for point in ordered if point > frame]
+            self.seek(later[0] if later else frame)
 
     def copy_selected(self):
         if self.selected_id:
@@ -746,7 +988,7 @@ class Window(QMainWindow):
                 raise ValueError("Playhead must be inside selected clip")
             if left:
                 self.editor.properties([c["id"]],dict(durationFrames=end(c)-f,trimStartFrame=c.get("trimStartFrame",0)+round((f-c["startFrame"])*c.get("speed",1))))
-                self.editor.move([dict(clipId=c["id"],toFrame=f)])
+                self.editor.move([dict(clipId=c["id"],toFrame=f)], follow_links=False)
             else:
                 self.editor.properties([c["id"]],dict(durationFrames=f-c["startFrame"]))
         self.act(lambda:self.editor.mutate("Trim to playhead",action))
@@ -786,13 +1028,19 @@ class Window(QMainWindow):
         self.import_paths(files)
 
     def import_paths(self,files,placement=None):
-        if not files:
+        if not files or self.import_busy:
             return
         revision=self.editor.doc["activeTimelineId"]
+        self.import_busy=True
+        self.import_button.setEnabled(False)
+        self.import_button.setText("Importing…")
         self.statusBar().showMessage("Inspecting media…")
         def work():
             return [probe(file) for file in files]
         def ready(entries,error):
+            self.import_busy=False
+            self.import_button.setEnabled(True)
+            self.import_button.setText("+ Import")
             if error:
                 self.act(lambda:(_ for _ in ()).throw(error))
                 return
@@ -800,10 +1048,63 @@ class Window(QMainWindow):
                 self.statusBar().showMessage("Import cancelled: active timeline changed")
                 return
             self.editor.mutate("Import media",lambda:self.editor.manifest["entries"].extend(entries))
-            self.statusBar().showMessage(f"Imported {len(entries)} media files")
+            self.statusBar().showMessage(f"Imported {len(entries)} media file" + ("" if len(entries)==1 else "s"))
             if placement:
                 self.place_media([m["id"] for m in entries],*placement)
         self.task(work,ready)
+
+    def library_menu(self, pos):
+        item = self.library.itemAt(pos)
+        if item is None:
+            return
+        self.library.setCurrentItem(item)
+        menu = QMenu(self)
+        menu.addAction("Relink file…", self.relink_selected_media)
+        menu.addAction("Show in folder", self.reveal_selected_media)
+        menu.exec(self.library.mapToGlobal(pos))
+
+    def relink_selected_media(self):
+        item = self.library.currentItem()
+        if item is None:
+            return
+        media_id = item.data(Qt.UserRole)
+        file, _ = QFileDialog.getOpenFileName(self, "Relink media", "", "Media (*.mp4 *.mov *.mkv *.mp3 *.wav *.png *.jpg *.jpeg);;All files (*)")
+        if not file:
+            return
+        def ready(probed, error):
+            if error:
+                self.act(lambda: (_ for _ in ()).throw(error))
+                return
+            def action():
+                self.editor.relink_media(media_id, probed)
+                self.images.pop(media_id, None)
+                self.thumbnail_pending.discard(media_id)
+            self.act(action)
+            self.statusBar().showMessage("Relinked " + probed.get("name", "media"))
+        self.statusBar().showMessage("Reading replacement file…")
+        self.task(lambda: probe(file), ready)
+
+    def reveal_selected_media(self):
+        item = self.library.currentItem()
+        if item is None:
+            return
+        try:
+            with self.editor.lock:
+                entry = self.editor.media(item.data(Qt.UserRole))
+                path = self.editor.media_path(entry) if entry else None
+        except ValueError as error:
+            self.statusBar().showMessage(str(error), 8000)
+            return
+        if path is None:
+            return
+        folder = path.parent if path.exists() else path.parent
+        if not folder.is_dir():
+            self.statusBar().showMessage("That folder is not on this computer", 8000)
+            return
+        try:
+            subprocess.Popen(["xdg-open", str(folder)])
+        except OSError as error:
+            self.statusBar().showMessage(str(error), 8000)
 
     def place_media(self,payload,frame,row):
         if any(not self.editor.media(item) for item in payload):
@@ -843,19 +1144,31 @@ class Window(QMainWindow):
         snapshot=frozen_editor(self.editor)
         destination=Path(self.cache.name)/f"frame-{revision}-{self.editor.current_frame}.png"
         current=self.editor.current_frame
+        self.still.setPixmap(QPixmap())
+        self.still.setText("Rendering frame…")
+        self.preview_stack.setCurrentWidget(self.still)
+        self.statusBar().showMessage("Rendering frame…")
         def work():
             if not destination.exists():
-                render(snapshot,snapshot.timeline,destination,cancel=cancel,frame=current)
+                render(snapshot,snapshot.timeline,destination,cancel=cancel,frame=current,
+                       progress=lambda pct: self.bridge.progress.emit(pct, "Frame"))
             return destination
         def ready(file,error):
             if cancel.is_set() or revision!=self.editor.revision:
                 return
             if error:
+                self.still.setPixmap(QPixmap())
+                self.still.setText("Could not render this frame.\n"+str(error)[-240:])
+                self.preview_stack.setCurrentWidget(self.still)
                 self.statusBar().showMessage(str(error)[-500:],15000)
+                self.hide_idle_progress()
                 return
             pixmap=QPixmap(str(file))
+            self.still.setText("")
             self.still.setPixmap(pixmap.scaled(self.still.size(),Qt.KeepAspectRatio,Qt.SmoothTransformation))
             self.preview_stack.setCurrentWidget(self.still)
+            self.statusBar().showMessage("Frame ready", 3000)
+            self.bridge.progress.emit(100, "Frame")
         self.preview_future=self.task(work,ready)
 
     def toggle_play(self):
@@ -875,15 +1188,23 @@ class Window(QMainWindow):
         revision=self.editor.revision
         self.preview_job_revision=revision
         destination=Path(self.cache.name)/f"preview-{revision}.mp4"
-        self.statusBar().showMessage("Rendering composited playback cache — edits remain available")
+        self.statusBar().showMessage("Rendering composited playback — edits stay available")
+        self.still.setPixmap(QPixmap())
+        self.still.setText("Rendering playback…")
+        self.preview_stack.setCurrentWidget(self.still)
         def work():
             if not destination.exists():
-                render(snapshot,snapshot.timeline,destination,resolution="720p",bitrate=3,cancel=cancel)
+                render(snapshot,snapshot.timeline,destination,resolution="720p",bitrate=3,cancel=cancel,
+                       progress=lambda pct: self.bridge.progress.emit(pct, "Playback"))
             return destination
         def ready(file,error):
             if cancel.is_set() or revision!=self.editor.revision:
                 return
             if error:
+                self.still.setPixmap(QPixmap())
+                self.still.setText("Playback render failed.\n"+str(error)[-240:])
+                self.preview_stack.setCurrentWidget(self.still)
+                self.hide_idle_progress()
                 self.act(lambda:(_ for _ in ()).throw(error))
                 return
             self.preview_revision=revision
@@ -892,7 +1213,24 @@ class Window(QMainWindow):
             self.preview_stack.setCurrentWidget(self.video)
             self.player.play()
             self.statusBar().showMessage("Composited playback")
+            self.bridge.progress.emit(100, "Playback")
         self.task(work,ready)
+
+    def sync_play_button(self, state):
+        if hasattr(self, "play_button"):
+            self.play_button.setText("Pause" if state == QMediaPlayer.PlayingState else "Play")
+
+    def copy_timecode(self, event=None):
+        QGuiApplication.clipboard().setText(self.timecode.text())
+        self.statusBar().showMessage("Timecode copied", 2000)
+        if event is not None:
+            event.accept()
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, "timecode", None) and event.type() == QEvent.MouseButtonPress:
+            self.copy_timecode(event)
+            return True
+        return super().eventFilter(obj, event)
 
     @Slot(QVideoFrame)
     def present_frame(self, frame):
@@ -935,12 +1273,18 @@ class Window(QMainWindow):
         bitrate=QDoubleSpinBox()
         bitrate.setRange(.1,200)
         bitrate.setValue(8)
-        hardware=QCheckBox("Try NVIDIA NVENC; fall back to software")
+        hardware=QCheckBox("Try NVIDIA NVENC, then fall back to software")
+        from .media import hw_encoders
+        found = hw_encoders()
+        hint = QLabel("Detected encoders: " + (", ".join(found) if found else "software only (libx264 / libx265)"))
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#9AA3B5;")
         form.addRow("Codec",codec)
         form.addRow("Resolution",resolution)
         form.addRow("Bitrate (Mbps)",bitrate)
         layout.addLayout(form)
         layout.addWidget(hardware)
+        layout.addWidget(hint)
         buttons=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
@@ -948,21 +1292,27 @@ class Window(QMainWindow):
         if dialog.exec():
             file,_=QFileDialog.getSaveFileName(self,"Export",str(Path.home()/"Downloads"/(self.editor.name+".mp4")),"MP4 (*.mp4)")
             if file:
+                if not file.lower().endswith(".mp4"):
+                    file += ".mp4"
                 self.act(lambda:self.exports.start(dict(outputPath=file,codec=codec.currentText(),resolution=resolution.currentText(),bitrateMbps=bitrate.value(),hardware=hardware.isChecked())))
 
     def refresh_exports(self):
         jobs=self.exports.list()
         active=next((j for j in jobs if j["status"] in ("queued","running")),None)
         if active:
+            self.progress_owner="Export"
             self.progress.show()
             self.progress.setValue(active["progress"])
             self.progress.setFormat(active["status"]+" %p%")
         elif jobs:
-            self.progress.hide()
             latest=jobs[-1]
             if getattr(self,"reported_job",None)!=(latest["jobId"],latest["status"]):
                 self.reported_job=(latest["jobId"],latest["status"])
-                self.statusBar().showMessage("Export "+latest["status"]+": "+latest.get("error",latest["path"]),20000)
+                detail = latest.get("error") or latest["path"]
+                self.statusBar().showMessage("Export "+latest["status"]+": "+detail,20000)
+                if self.progress_owner=="Export":
+                    self.progress.hide()
+                    self.progress_owner=None
 
     def confirm_discard(self):
         if not self.editor.dirty:
@@ -998,15 +1348,22 @@ class Window(QMainWindow):
 
     def send_chat(self):
         prompt=self.chat_input.text().strip()
-        if not prompt:
+        if not prompt or not self.chat_send.isEnabled():
             return
         self.chat_input.clear()
-        self.chat_log.append("You: "+prompt)
+        self.chat_log.append("You: "+html.escape(prompt))
         self.chat_send.setEnabled(False)
-        model=self.model_input.text().strip()
+        self.chat_input.setEnabled(False)
+        self.chat_send.setText("Sending…")
+        model=self.model_input.text().strip() or "gpt-4.1-mini"
         def ready(result,error):
             self.chat_send.setEnabled(True)
-            self.chat_log.append("Agent: "+str(error or result))
+            self.chat_input.setEnabled(True)
+            self.chat_send.setText("Send · BYOK OpenAI")
+            text = str(error or result)
+            prefix = "Agent error: " if error else "Agent: "
+            self.chat_log.append(prefix+html.escape(text))
+            self.chat_input.setFocus()
         self.task(lambda:converse(prompt,self.tools,model),ready)
 
     def dragEnterEvent(self,event):
@@ -1024,6 +1381,15 @@ class Window(QMainWindow):
         step=5 if event.modifiers()&Qt.ShiftModifier else 1
         if event.key() in (Qt.Key_Left,Qt.Key_Right):
             self.seek(self.editor.current_frame+step*(-1 if event.key()==Qt.Key_Left else 1))
+        elif event.key()==Qt.Key_Up:
+            self.jump_edit(-1)
+        elif event.key()==Qt.Key_Down:
+            self.jump_edit(1)
+        elif event.key()==Qt.Key_Home:
+            self.seek(0)
+        elif event.key()==Qt.Key_End:
+            total=duration(self.editor.timeline)
+            self.seek(max(0, total-1) if total else 0)
         elif event.key()==Qt.Key_BracketLeft:
             self.trim_playhead(True)
         elif event.key()==Qt.Key_BracketRight:
